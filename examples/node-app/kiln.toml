@@ -1,0 +1,15 @@
+# A JavaScript service with its runtime pinned exactly.
+
+[project]
+name = "node-app"
+description = "A single Node.js service."
+
+[runtime]
+node = "22.14.0"
+
+[environment]
+NODE_ENV = "development"
+
+[commands]
+dev = "npm run dev"
+test = "npm test"

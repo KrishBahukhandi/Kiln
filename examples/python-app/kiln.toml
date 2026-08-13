@@ -1,0 +1,16 @@
+# A Python service. Pinning major.minor is usually right for Python: 3.13 and
+# 3.12 are different runtimes to any compiled extension.
+
+[project]
+name = "python-app"
+description = "A single Python service."
+
+[runtime]
+python = "3.13"
+
+[environment]
+PYTHONDONTWRITEBYTECODE = "1"
+
+[commands]
+dev = "python -m app"
+test = "python -m pytest"

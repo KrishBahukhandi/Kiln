@@ -1,0 +1,89 @@
+# kiln.example.toml
+#
+# Every section Kiln understands, annotated. Copy the parts you need into your
+# project's kiln.toml, or run `kiln init` and let Kiln propose one.
+
+# ---------------------------------------------------------------------------
+# [project] — required
+# ---------------------------------------------------------------------------
+[project]
+# Letters, digits, and then any of - _ . Used in Kiln's output.
+name = "example-app"
+
+# Optional. Kiln does not interpret these.
+version = "0.1.0"
+description = "A project that pins its own development environment."
+
+# ---------------------------------------------------------------------------
+# [runtime] — the language runtimes this project needs
+# ---------------------------------------------------------------------------
+#
+#   22.14.0     exactly 22.14.0
+#   22          any 22.x.x
+#   22.14       any 22.14.x
+#   ^22.14      >=22.14.0, <23.0.0
+#   ~22.14      >=22.14.0, <22.15.0
+#   >=22, <23   every comparator must hold
+#   lts         resolved by the provider, then recorded in kiln.lock
+#
+# Note that `22.14.0` means exactly 22.14.0 — not "22.14.0 or later". Kiln
+# never changes a major version on you, and never selects a pre-release unless
+# the requirement names one.
+[runtime]
+node = "22.14.0"
+python = "3.13.5"
+
+# ---------------------------------------------------------------------------
+# [tools] — tools that ride on top of a runtime
+# ---------------------------------------------------------------------------
+#
+# Kiln 0.1.0 has providers for `node` and `python` only. Pinning a tool with no
+# provider makes `kiln install` refuse the whole manifest rather than quietly
+# skip it, so this line stays commented until a pnpm provider exists.
+[tools]
+# pnpm = "10.12.1"
+
+# ---------------------------------------------------------------------------
+# [environment] — variables exported into the project environment
+# ---------------------------------------------------------------------------
+#
+# `PATH` cannot be set here: Kiln composes it from the runtimes above, and a
+# project that overwrote it would disable the environment it just asked for.
+# `LD_PRELOAD` and `DYLD_INSERT_LIBRARIES` are refused for the same reason a
+# cloned repository should not be able to inject a library into every process
+# you run.
+[environment]
+NODE_ENV = "development"
+API_URL = "http://localhost:3000"
+
+# ---------------------------------------------------------------------------
+# [commands] — named commands, run with `kiln run <name>`
+# ---------------------------------------------------------------------------
+#
+# Kiln executes these directly, without a shell. `&&`, `|`, `>` and `$` are not
+# interpreted, and a command that uses them is rejected when the manifest is
+# parsed. Quoting works as you would expect:
+#
+#     ok       dev     = "npm run dev"
+#     ok       check   = "node -e 'console.log(1)'"
+#     rejected build   = "npm run build && npm test"
+#     instead  release = "./scripts/release.sh"
+#
+# Extra arguments are appended: `kiln run test --watch` runs the `test` command
+# with `--watch` on the end.
+[commands]
+dev = "npm run dev"
+test = "npm test"
+lint = "eslint src"
+
+# ---------------------------------------------------------------------------
+# [services] — backing services
+# ---------------------------------------------------------------------------
+#
+# Parsed and reported today; nothing in this release starts, stops or
+# provisions a service. `kiln install` will tell you it saw them.
+# Service management is Phase 8, and Docker will not become a requirement of
+# the runtime manager.
+[services]
+postgres = "17"
+redis = "7"

@@ -1,0 +1,8 @@
+[project]
+name = "app"
+
+[runtime]
+node = "22"
+
+[commands]
+dev = "npm run build && npm run dev"

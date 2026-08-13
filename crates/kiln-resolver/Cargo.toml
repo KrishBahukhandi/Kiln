@@ -1,0 +1,21 @@
+[package]
+name = "kiln-resolver"
+description = "Turning a kiln.toml into an exact, lockable environment."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kiln-cache = { workspace = true }
+kiln-config = { workspace = true }
+kiln-core = { workspace = true }
+kiln-net = { workspace = true }
+kiln-runtime = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

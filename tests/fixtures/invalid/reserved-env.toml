@@ -1,0 +1,8 @@
+[project]
+name = "app"
+
+[runtime]
+node = "22"
+
+[environment]
+PATH = "/usr/bin"

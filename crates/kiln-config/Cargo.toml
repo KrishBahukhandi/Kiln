@@ -1,0 +1,14 @@
+[package]
+name = "kiln-config"
+description = "The kiln.toml schema: parsing, validation, discovery and generation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kiln-core = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }

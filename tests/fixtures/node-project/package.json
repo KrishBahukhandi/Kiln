@@ -1,0 +1,7 @@
+{
+  "name": "storefront",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "packageManager": "pnpm@10.12.1+sha512.0000000000000000000000000000000000000000",
+  "scripts": { "dev": "vite", "test": "vitest run" }
+}

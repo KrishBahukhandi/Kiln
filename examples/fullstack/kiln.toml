@@ -1,0 +1,28 @@
+# Two runtimes and the services the project expects.
+#
+# Kiln 0.1.0 parses [services] and reports it, but does not start anything.
+# The runtimes above it are managed normally.
+
+[project]
+name = "fullstack"
+version = "2.4.0"
+description = "A JavaScript front end, a Python API, and their datastores."
+
+[runtime]
+node = "22.14.0"
+python = "3.13.5"
+
+[environment]
+NODE_ENV = "development"
+DATABASE_URL = "postgres://localhost:5432/fullstack"
+REDIS_URL = "redis://localhost:6379"
+
+[commands]
+dev = "npm run dev"
+api = "python -m uvicorn api.main:app"
+test = "npm test"
+"test:api" = "python -m pytest"
+
+[services]
+postgres = "17"
+redis = "7"

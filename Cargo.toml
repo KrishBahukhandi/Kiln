@@ -1,0 +1,63 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# 1.88 is the floor for let-chains, which this codebase uses in the detection
+# paths. Edition 2024 itself only needs 1.85.
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/bahukhandi-labs/kiln"
+homepage = "https://github.com/bahukhandi-labs/kiln"
+authors = ["Kiln contributors"]
+
+[workspace.dependencies]
+kiln-cache = { path = "crates/kiln-cache", version = "0.1.0" }
+kiln-config = { path = "crates/kiln-config", version = "0.1.0" }
+kiln-core = { path = "crates/kiln-core", version = "0.1.0" }
+kiln-exec = { path = "crates/kiln-exec", version = "0.1.0" }
+kiln-net = { path = "crates/kiln-net", version = "0.1.0" }
+kiln-resolver = { path = "crates/kiln-resolver", version = "0.1.0" }
+kiln-runtime = { path = "crates/kiln-runtime", version = "0.1.0" }
+
+clap = { version = "4", features = ["derive"] }
+directories = "6"
+# Blocking HTTP with rustls. Chosen over reqwest because `RuntimeProvider` must
+# stay object-safe for the registry and a future plugin boundary, and because a
+# CLI that answers `kiln version` in under two milliseconds should not be
+# constructing an async runtime to do it.
+ureq = { version = "3", default-features = false, features = [
+    "rustls",
+    "gzip",
+] }
+# Pure-Rust inflate, so Kiln does not need a C toolchain to build.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+# Safe signal registration: installing a handler is what stops SIGINT from
+# killing Kiln while a child process is still shutting down. The raw APIs are
+# `unsafe`; this wrapper is not, and every Kiln crate forbids unsafe.
+signal-hook = { version = "0.4", default-features = false }
+indicatif = { version = "0.18", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = [
+    "fmt",
+    "env-filter",
+    "ansi",
+] }
+
+assert_cmd = "2"
+predicates = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

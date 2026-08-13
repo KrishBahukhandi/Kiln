@@ -1,0 +1,33 @@
+[package]
+name = "kiln-cli"
+description = "Kiln: define your development environment in one file."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "kiln"
+path = "src/main.rs"
+
+[dependencies]
+kiln-cache = { workspace = true }
+kiln-config = { workspace = true }
+kiln-core = { workspace = true }
+kiln-exec = { workspace = true }
+kiln-net = { workspace = true }
+kiln-resolver = { workspace = true }
+kiln-runtime = { workspace = true }
+
+clap = { workspace = true }
+indicatif = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }

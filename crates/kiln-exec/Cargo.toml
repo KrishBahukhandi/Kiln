@@ -1,0 +1,19 @@
+[package]
+name = "kiln-exec"
+description = "Composing the project environment and running commands inside it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+kiln-config = { workspace = true }
+kiln-core = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

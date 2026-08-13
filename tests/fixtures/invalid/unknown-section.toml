@@ -1,0 +1,5 @@
+[project]
+name = "app"
+
+[runtimes]
+node = "22"

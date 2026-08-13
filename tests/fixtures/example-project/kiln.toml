@@ -1,0 +1,31 @@
+# The reference manifest. Every section Kiln understands appears here, so the
+# integration tests exercise the whole schema rather than the happy path.
+
+[project]
+name = "example-app"
+version = "0.1.0"
+description = "A project that pins its own development environment."
+
+[runtime]
+node = "22.14.0"
+python = "3.13.5"
+
+[tools]
+# Tools ride on a runtime. Kiln has no provider for pnpm yet, so pinning it here
+# would declare an environment this release cannot build — `kiln install` would
+# refuse the whole manifest. This is exactly what `kiln init` writes.
+# pnpm = "10.12.1"
+
+[environment]
+NODE_ENV = "development"
+API_URL = "http://localhost:3000"
+
+[commands]
+dev = "npm run dev"
+test = "npm test"
+"test:unit" = "npm run test:unit"
+
+[services]
+# Parsed and reported. Nothing in this release starts a service.
+postgres = "17"
+redis = "7"
