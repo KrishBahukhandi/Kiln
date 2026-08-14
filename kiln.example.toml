@@ -32,6 +32,7 @@ description = "A project that pins its own development environment."
 [runtime]
 node = "22.14.0"
 python = "3.13.5"
+go = "1.25"
 
 # ---------------------------------------------------------------------------
 # [tools] — tools that ride on top of a runtime

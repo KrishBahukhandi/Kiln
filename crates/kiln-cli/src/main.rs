@@ -60,7 +60,7 @@ fn dispatch(cli: &Cli, ui: &Ui) -> Result<ExitCode> {
         }
         Command::Run(args) => commands::run::run(args, &directory, ui),
         Command::Shell(args) => commands::shell::run(args, &directory, ui),
-        Command::Clean(_) => commands::pending::clean(&directory).map(|()| ExitCode::SUCCESS),
+        Command::Clean(args) => commands::clean::run(args, ui).map(|()| ExitCode::SUCCESS),
     }
 }
 

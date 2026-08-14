@@ -122,9 +122,9 @@ and runs `kiln install` gets byte-identical runtimes.
 | ✅ | `kiln run` | Runs a command in the environment. Transparent exit codes. |
 | ✅ | `kiln shell` | A shell with the project's runtimes in front. |
 | ✅ | `kiln cache list` | What is in the store and where it came from. `--json`. |
+| ✅ | `kiln clean` | Removes scratch space and cached indexes. `--force` to delete. |
 | ✅ | `kiln version` | Version, platform and store location. `--json`. |
-| ⬜ | `kiln clean` | Phase 5. |
-| ⬜ | `kiln cache verify` / `clean` | Phase 3. |
+| ⬜ | `kiln cache verify` / `cache clean` | Phase 3. |
 
 Unimplemented commands exit non-zero with a message naming the phase they belong
 to. They never pretend to succeed.
@@ -135,6 +135,10 @@ to. They never pretend to succeed.
 | --- | --- | --- |
 | Node.js | [nodejs.org](https://nodejs.org/dist) | macOS and Linux, x86-64 and arm64 (glibc only — upstream publishes no musl builds) |
 | Python | [python-build-standalone](https://github.com/astral-sh/python-build-standalone) | macOS and Linux, x86-64 and arm64, glibc **and** musl |
+| Go | [go.dev](https://go.dev/dl) | macOS and Linux, x86-64 and arm64, glibc and musl (the toolchain is statically linked) |
+
+Adding one is a single file plus a line in the registry — see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## `kiln.toml`
 
@@ -147,6 +151,7 @@ description = "..."           # optional
 [runtime]                     # language runtimes
 node = "22.14.0"
 python = "3.13.5"
+go = "1.25"
 
 [tools]                       # tools that ride on a runtime
 pnpm = "10.12.1"
@@ -424,11 +429,12 @@ question you can answer by reading the dependency graph.
 | 1 | `kiln init`, validation, project discovery | ✅ done |
 | 2 | Node.js and Python providers: resolve, download, verify, install | ✅ done |
 | 3 | Cache verification and garbage collection | next |
+| 8 | More runtimes | Go done; Rust, Bun, Deno next |
 | 4 | `kiln shell`, `kiln run` | ✅ done |
 | 5 | `kiln clean`, richer output | partial |
 | 6 | Cross-platform locking, `--locked` for CI, drift reporting | ✅ done |
 | 7 | Parallel downloads, concurrency, mirrors, signatures | partial |
-| 8 | More runtimes, services, OCI, Windows, IDE integration | |
+| 8 | Services, OCI, Windows, IDE integration | |
 
 Explicitly **not** planned for 1.0: user accounts, a cloud dashboard, telemetry,
 remote execution, or replacing containers.

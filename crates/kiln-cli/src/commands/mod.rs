@@ -1,12 +1,12 @@
 //! One module per command.
 
 pub mod cache;
+pub mod clean;
 pub mod doctor;
 pub mod init;
 pub mod install;
 pub mod list;
 pub mod lock;
-pub mod pending;
 pub mod progress;
 pub mod run;
 pub mod shell;

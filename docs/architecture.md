@@ -259,6 +259,26 @@ so `node = "22.14.0"` costs one small checksum request rather than a
 quarter-megabyte of JSON — which also means a fully pinned project depends on
 less upstream infrastructure staying up.
 
+### What adding a runtime actually costs
+
+Go was added after Node.js and Python, and the claim held: one file in
+`providers/`, one line in `Registry::builtin`, and nothing else in the workspace
+changed. Each provider's oddities stayed inside its own file —
+
+| | Node.js | Python | Go |
+| --- | --- | --- | --- |
+| Version index | `dist/index.json` | `SHA256SUMS` per release | `dl/?mode=json` |
+| Checksums | separate `SHASUMS256.txt` | same file as the index | **inline in the index** |
+| Requests to resolve | 2 | 2 | 1 |
+| musl | not published | separate artifact | same artifact (static) |
+| Version quirk | `lts` is `false` or a string | none | `go1.20`, `go1.27rc3` |
+
+— which is the point of the abstraction. Go's is the sharpest example: its
+filenames use the upstream string verbatim, so `go1.20`'s tarball is
+`go1.20.darwin-arm64.tar.gz` and not `go1.20.0...`. The provider takes filenames
+from the index rather than rebuilding them from a normalised version, and that
+decision is invisible to every other crate.
+
 ### `ServiceProvider`
 
 Still unwritten, for the same reason the download methods were unwritten in Phase

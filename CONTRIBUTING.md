@@ -83,6 +83,13 @@ Note what you do *not* write: downloading, verifying and extracting are shared.
 A provider declares a `RuntimeLayout` and the installer does the rest, so there
 is exactly one piece of tar-handling code in Kiln to get right.
 
+Go was added this way and it took one file plus one registry line — but adding
+it did surface a bug elsewhere, which is worth knowing about. `go` is two
+characters, and the "did you mean?" suggestion used a fixed two-edit budget, so
+it started proposing `go` for `io`, `ai` and the empty string. Short names now
+match on shared prefix only. Adding a runtime with an unusually short or long
+name is worth a glance at `Registry::suggest`.
+
 That is the whole change. Nothing in `kiln-config`, `kiln-resolver` or
 `kiln-cli` should need touching — if it does, the abstraction has a hole and the
 hole is the bug.

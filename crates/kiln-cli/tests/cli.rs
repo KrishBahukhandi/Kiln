@@ -188,12 +188,19 @@ fn help_marks_the_commands_that_are_not_built_yet() {
     let assert = sandbox.kiln().arg("--help").assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
-    // Honesty in the help text, not just in the error.
-    assert!(stdout.contains("[Phase 5]"), "unbuilt commands must say so");
-    // ...and commands that now work must have stopped claiming otherwise.
+    // Honesty in the help text, not just in the error. Every top-level command
+    // works now, so the marker has moved down to the cache subcommands.
     assert!(
         !stdout.contains("[Phase 4]"),
         "run and shell are implemented"
+    );
+    assert!(!stdout.contains("[Phase 5]"), "clean is implemented");
+
+    let cache = sandbox.kiln().args(["cache", "--help"]).assert().success();
+    let cache_help = String::from_utf8(cache.get_output().stdout.clone()).unwrap();
+    assert!(
+        cache_help.contains("[Phase 3]"),
+        "unbuilt commands must say so"
     );
 }
 
@@ -754,8 +761,8 @@ fn unbuilt_commands_fail_loudly_and_name_their_phase() {
     sandbox.write("kiln.toml", MINIMAL);
 
     for (args, phase) in [
-        (vec!["clean"], "Phase 5"),
         (vec!["cache", "verify"], "Phase 3"),
+        (vec!["cache", "clean"], "Phase 3"),
     ] {
         sandbox
             .kiln()
@@ -770,12 +777,7 @@ fn unbuilt_commands_fail_loudly_and_name_their_phase() {
 #[test]
 fn commands_report_a_missing_project_first() {
     let sandbox = Sandbox::new();
-    for args in [
-        vec!["run", "node"],
-        vec!["shell"],
-        vec!["list"],
-        vec!["clean"],
-    ] {
+    for args in [vec!["run", "node"], vec!["shell"], vec!["list"]] {
         sandbox
             .kiln()
             .args(&args)
@@ -1648,4 +1650,144 @@ fn lock_help_explains_the_team_workflow() {
     assert!(stdout.contains("--all-platforms"));
     assert!(stdout.contains("--check"));
     assert!(stdout.contains("--platform"));
+}
+
+// ---------------------------------------------------------------------------
+// Go, and the cost of adding a runtime
+// ---------------------------------------------------------------------------
+
+#[test]
+fn go_is_a_known_runtime() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n[runtime]\ngo = \"1.25\"\n",
+    );
+
+    // Offline, so this reaches the network and stops — which proves the
+    // manifest validated and `go` resolved to a real provider.
+    sandbox
+        .kiln()
+        .arg("install")
+        .assert()
+        .code(exit::NETWORK)
+        .stderr(contains("offline"));
+}
+
+#[test]
+fn an_unknown_runtime_lists_go_among_the_alternatives() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n[runtime]\nrust = \"1.80\"\n",
+    );
+
+    sandbox
+        .kiln()
+        .arg("install")
+        .assert()
+        .code(exit::NOT_FOUND)
+        .stderr(contains("one of: go, node, python"));
+}
+
+#[test]
+fn golang_is_corrected_to_go() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n[runtime]\ngolang = \"1.25\"\n",
+    );
+
+    sandbox
+        .kiln()
+        .arg("install")
+        .assert()
+        .code(exit::NOT_FOUND)
+        .stderr(contains("did you mean `go`?"));
+}
+
+#[test]
+fn init_detects_a_go_project_from_its_go_mod() {
+    let sandbox = Sandbox::new();
+    sandbox.write("go.mod", "module example.com/app\n\ngo 1.25\n");
+
+    sandbox
+        .kiln()
+        .args(["init", "--yes"])
+        .assert()
+        .success()
+        .stderr(contains("Go"))
+        .stderr(contains("go.mod (go directive)"));
+
+    assert!(sandbox.read("kiln.toml").contains("go = \"1.25\""));
+}
+
+// ---------------------------------------------------------------------------
+// clean
+// ---------------------------------------------------------------------------
+
+#[test]
+fn clean_reports_before_it_removes() {
+    let sandbox = Sandbox::new();
+    let staging = sandbox.home.path().join("staging/interrupted-999");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("partial"), vec![0u8; 4096]).unwrap();
+
+    sandbox
+        .kiln()
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("would be freed"))
+        .stderr(contains("Nothing was removed"));
+
+    // A command whose whole job is deleting must not delete by default.
+    assert!(staging.exists(), "dry run must leave everything in place");
+}
+
+#[test]
+fn clean_force_removes_interrupted_installs() {
+    let sandbox = Sandbox::new();
+    let staging = sandbox.home.path().join("staging/interrupted-999");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("partial"), vec![0u8; 4096]).unwrap();
+
+    sandbox
+        .kiln()
+        .args(["clean", "--force"])
+        .assert()
+        .success()
+        .stderr(contains("Freed"));
+
+    assert!(!staging.exists());
+}
+
+#[test]
+fn clean_never_touches_installed_runtimes() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    std::fs::create_dir_all(sandbox.home.path().join("staging/junk")).unwrap();
+
+    sandbox.kiln().args(["clean", "--force"]).assert().success();
+
+    // The store is the one thing `kiln clean` must leave alone.
+    let assert = sandbox
+        .kiln()
+        .args(["cache", "list", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["artifacts"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn clean_on_a_fresh_machine_says_so() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .kiln()
+        .arg("clean")
+        .assert()
+        .success()
+        .stderr(contains("Nothing to clean"));
 }

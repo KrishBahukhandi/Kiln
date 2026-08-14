@@ -3,13 +3,24 @@
 use std::sync::Arc;
 
 use crate::provider::RuntimeProvider;
-use crate::providers::{NodeProvider, PythonProvider};
+use crate::providers::{GoProvider, NodeProvider, PythonProvider};
 
 /// How different two names may be before Kiln stops offering a correction.
 ///
-/// Two edits catches `pyton`, `nodejs` and `pytohn` without producing the kind
-/// of confident wrong guess that sends someone down the wrong path.
-const MAX_SUGGESTION_DISTANCE: usize = 2;
+/// Scaled to the length of the runtime being compared against.
+///
+/// A fixed budget of two edits is fine for `python`. For a two-letter name like
+/// `go` it matches almost anything — `io` and `ai` are one edit away, and the
+/// empty string is two — so short names get a budget of zero and are matched by
+/// shared prefix only.
+///
+/// The cost is that a one-character typo of `go` gets no suggestion. That is the
+/// right trade: in two characters there is no way to tell a typo from a
+/// different word, and a confident wrong guess sends someone down the wrong
+/// path more expensively than saying nothing does.
+fn suggestion_budget(candidate: &str) -> usize {
+    if candidate.len() <= 3 { 0 } else { 2 }
+}
 
 /// The runtime providers available to this process.
 #[derive(Clone)]
@@ -25,7 +36,11 @@ impl Registry {
     /// provider came from.
     pub fn builtin() -> Self {
         Registry {
-            providers: vec![Arc::new(NodeProvider), Arc::new(PythonProvider)],
+            providers: vec![
+                Arc::new(NodeProvider),
+                Arc::new(PythonProvider),
+                Arc::new(GoProvider),
+            ],
         }
     }
 
@@ -79,12 +94,33 @@ impl Registry {
     /// something Kiln does not have.
     pub fn suggest(&self, unknown: &str) -> Option<&'static str> {
         let needle = unknown.to_ascii_lowercase();
+        if needle.is_empty() {
+            return None;
+        }
+
         self.providers
             .iter()
-            .map(|p| (p.id(), levenshtein(&needle, p.id())))
-            .filter(|(_, distance)| *distance <= MAX_SUGGESTION_DISTANCE)
-            .min_by_key(|(id, distance)| (*distance, *id))
-            .map(|(id, _)| id)
+            .filter_map(|provider| {
+                let id = provider.id();
+
+                // A shared prefix catches what edit distance cannot: `golang`
+                // is four edits from `go`, and `nodejs` two from `node`, but
+                // both are obviously the same word with something on the end.
+                let related = needle.starts_with(id) || id.starts_with(&needle);
+                let distance = levenshtein(&needle, id);
+
+                if related {
+                    Some((0, distance, id))
+                } else if distance <= suggestion_budget(id) {
+                    Some((1, distance, id))
+                } else {
+                    None
+                }
+            })
+            // Prefix matches first, then the closest, then alphabetically so
+            // the answer never depends on registration order.
+            .min()
+            .map(|(_, _, id)| id)
     }
 }
 
@@ -137,10 +173,11 @@ mod tests {
     #[test]
     fn the_builtin_registry_has_node_and_python() {
         let registry = Registry::builtin();
-        assert_eq!(registry.ids(), ["node", "python"]);
+        assert_eq!(registry.ids(), ["go", "node", "python"]);
         assert!(registry.contains("node"));
         assert!(registry.contains("python"));
-        assert!(!registry.contains("go"));
+        assert!(registry.contains("go"));
+        assert!(!registry.contains("ruby"));
     }
 
     #[test]
@@ -190,11 +227,45 @@ mod tests {
     }
 
     #[test]
+    fn suggests_a_correction_for_the_longer_name_of_a_runtime() {
+        // Edit distance alone never finds these: `golang` is four edits from
+        // `go`. They are the single most likely thing for someone to type.
+        let registry = Registry::builtin();
+        assert_eq!(registry.suggest("golang"), Some("go"));
+        assert_eq!(registry.suggest("python3"), Some("python"));
+        assert_eq!(registry.suggest("py"), Some("python"));
+    }
+
+    #[test]
     fn stays_quiet_when_nothing_is_close() {
         let registry = Registry::builtin();
         assert_eq!(registry.suggest("postgres"), None);
         assert_eq!(registry.suggest("rust"), None);
         assert_eq!(registry.suggest(""), None);
+    }
+
+    #[test]
+    fn a_short_runtime_name_does_not_match_everything() {
+        // `go` is two characters, so a two-edit budget would match `io`, `ai`
+        // and the empty string. Guessing `go` at someone who asked for Rust is
+        // worse than admitting Kiln does not have it.
+        let registry = Registry::builtin();
+        for unrelated in ["io", "ai", "cc", "", "zig", "ada", "gp"] {
+            assert_eq!(
+                registry.suggest(unrelated),
+                None,
+                "`{unrelated}` should get no suggestion"
+            );
+        }
+        // A shared prefix is the only signal short enough to trust.
+        assert_eq!(registry.suggest("golang"), Some("go"));
+    }
+
+    #[test]
+    fn the_suggestion_budget_scales_with_the_name() {
+        assert_eq!(suggestion_budget("go"), 0);
+        assert_eq!(suggestion_budget("node"), 2);
+        assert_eq!(suggestion_budget("python"), 2);
     }
 
     #[test]

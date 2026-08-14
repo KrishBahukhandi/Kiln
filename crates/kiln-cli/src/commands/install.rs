@@ -146,11 +146,8 @@ fn summarise(ui: &Ui, outcome: &kiln_resolver::InstallOutcome, manifest: &kiln_c
     ui.blank();
     ui.ok("Environment ready");
     ui.blank();
-    ui.note("  `kiln shell` and `kiln run` arrive in Phase 4.");
-    ui.note(format!(
-        "  Installed runtimes live in {}",
-        humanize_store(outcome)
-    ));
+    ui.note(format!("  Installed into {}", humanize_store(outcome)));
+    ui.note("  `kiln shell` to enter it, or `kiln run <command>` for one command.");
 }
 
 fn humanize_store(outcome: &kiln_resolver::InstallOutcome) -> String {

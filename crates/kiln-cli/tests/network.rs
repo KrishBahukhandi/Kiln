@@ -529,3 +529,75 @@ fn a_ci_runner_installs_from_a_committed_lockfile() {
     // The lockfile the runner used is the one that was reviewed.
     assert_eq!(runner.read("kiln.lock"), author.read("kiln.lock"));
 }
+
+#[test]
+#[ignore = "downloads from go.dev"]
+fn go_installs_and_runs() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ngo = \"1.25\"\n",
+    );
+
+    sandbox.kiln().arg("install").assert().success();
+
+    // `go version` prints "go version go1.25.x ..." rather than a bare version.
+    let output = std::process::Command::new(
+        find_binary(&sandbox.home.path().join("store"), "bin/go").unwrap(),
+    )
+    .arg("version")
+    .output()
+    .expect("run go");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("go1.25."), "got {text}");
+}
+
+#[test]
+#[ignore = "reads the go.dev release index"]
+fn go_takes_its_checksum_from_the_index() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ngo = \"1.25\"\n",
+    );
+    sandbox.kiln().args(["lock"]).assert().success();
+
+    let lockfile = sandbox.read("kiln.lock");
+    assert!(lockfile.contains("go.dev/dl/go1.25."), "{lockfile}");
+    assert!(lockfile.contains("digest = \"sha256:"));
+    // go.dev states sizes, unlike the other two feeds.
+    assert!(lockfile.contains("size = "), "{lockfile}");
+}
+
+#[test]
+#[ignore = "reads the go.dev release index"]
+fn go_locks_for_every_platform_including_musl() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ngo = \"1.25\"\n",
+    );
+
+    // Go's toolchain is statically linked, so unlike Node.js nothing is
+    // skipped — every supported platform gets an entry.
+    sandbox
+        .kiln()
+        .args(["lock", "--all-platforms"])
+        .assert()
+        .success();
+
+    let lockfile = sandbox.read("kiln.lock");
+    for platform in [
+        "macos-aarch64",
+        "macos-x86_64",
+        "linux-x86_64-gnu",
+        "linux-x86_64-musl",
+        "linux-aarch64-gnu",
+        "linux-aarch64-musl",
+    ] {
+        assert!(
+            lockfile.contains(&format!("[platform.{platform}.")),
+            "missing {platform}"
+        );
+    }
+}

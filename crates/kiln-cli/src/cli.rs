@@ -106,7 +106,7 @@ pub enum Command {
     /// Inspect Kiln's artifact store.
     Cache(CacheArgs),
 
-    /// Remove project-local Kiln state. [Phase 5]
+    /// Remove Kiln's scratch space and cached release indexes.
     Clean(CleanArgs),
 
     /// Show version and environment information.
@@ -212,7 +212,7 @@ pub enum CacheCommand {
 
 #[derive(Debug, clap::Args)]
 pub struct CleanArgs {
-    /// Actually delete, rather than reporting what would be deleted.
+    /// Actually delete. Without it, Kiln only reports what it would remove.
     #[arg(long)]
     pub force: bool,
 }
