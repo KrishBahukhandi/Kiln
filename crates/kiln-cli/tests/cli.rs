@@ -67,6 +67,10 @@ impl Sandbox {
     /// real install as long as its directory is named by the right digest. That
     /// lets the whole install path — lockfile, reuse, PATH — be tested without
     /// downloading fifty megabytes.
+    ///
+    /// Installed *now*, not at a fixed date: an entry with no recorded use ages
+    /// from its install time, so a hardcoded timestamp would make every freshly
+    /// planted runtime look abandoned as the calendar moved on.
     fn plant(&self, digest_hex: &str, provider: &str, version: &str) {
         let entry = self.entry_path(digest_hex);
         std::fs::create_dir_all(entry.join("content/bin")).unwrap();
@@ -77,8 +81,18 @@ impl Sandbox {
                 "provider = \"{provider}\"\nversion = \"{version}\"\n\
                  url = \"https://example.test/artifact.tar.gz\"\n\
                  digest = \"sha256:{digest_hex}\"\n\
-                 artifact_bytes = 1024\ninstalled_unix = 1780000000\n"
+                 artifact_bytes = 1024\ninstalled_unix = {now}\n",
+                now = kiln_now(),
             ),
+        )
+        .unwrap();
+    }
+
+    /// Backdate an entry so garbage collection considers it idle.
+    fn age(&self, digest_hex: &str, unix: u64) {
+        std::fs::write(
+            self.entry_path(digest_hex).join("last-used"),
+            unix.to_string(),
         )
         .unwrap();
     }
@@ -760,18 +774,14 @@ fn unbuilt_commands_fail_loudly_and_name_their_phase() {
     let sandbox = Sandbox::new();
     sandbox.write("kiln.toml", MINIMAL);
 
-    for (args, phase) in [
-        (vec!["cache", "verify"], "Phase 3"),
-        (vec!["cache", "clean"], "Phase 3"),
-    ] {
-        sandbox
-            .kiln()
-            .args(&args)
-            .assert()
-            .code(exit::NOT_IMPLEMENTED)
-            .stderr(contains("not implemented"))
-            .stderr(contains(phase));
-    }
+    // Only `cache verify` is left; it needs a directory-hash scheme first.
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        .code(exit::NOT_IMPLEMENTED)
+        .stderr(contains("not implemented"))
+        .stderr(contains("Phase 3"));
 }
 
 #[test]
@@ -1790,4 +1800,181 @@ fn clean_on_a_fresh_machine_says_so() {
         .assert()
         .success()
         .stderr(contains("Nothing to clean"));
+}
+
+// ---------------------------------------------------------------------------
+// cache clean
+//
+// Kiln keeps no registry of projects, so reachability is unknowable and
+// eviction goes by last use instead. These pin down both halves: that idle
+// entries go, and that used ones stay.
+// ---------------------------------------------------------------------------
+
+/// A timestamp comfortably older than any sane `--older-than`.
+const LONG_AGO: u64 = 1_600_000_000;
+
+#[test]
+fn cache_clean_keeps_recently_used_runtimes() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean"])
+        .assert()
+        .success()
+        .stderr(contains("Nothing to remove"));
+}
+
+#[test]
+fn cache_clean_reports_idle_runtimes_without_removing_them() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.age(PLANTED, LONG_AGO);
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean"])
+        .assert()
+        .success()
+        .stderr(contains("node 22.14.0"))
+        .stderr(contains("would be removed"))
+        .stderr(contains("Nothing was deleted"));
+
+    // A command whose job is deleting must not delete by default.
+    assert!(sandbox.entry_path(PLANTED).exists());
+}
+
+#[test]
+fn cache_clean_force_removes_idle_runtimes() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.age(PLANTED, LONG_AGO);
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean", "--force"])
+        .assert()
+        .success()
+        .stderr(contains("Removed 1 runtime"))
+        .stderr(contains("comes back with `kiln install`"));
+
+    assert!(!sandbox.entry_path(PLANTED).exists());
+}
+
+#[test]
+fn cache_clean_leaves_no_debris_in_the_store() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.age(PLANTED, LONG_AGO);
+    sandbox
+        .kiln()
+        .args(["cache", "clean", "--force"])
+        .assert()
+        .success();
+
+    let assert = sandbox
+        .kiln()
+        .args(["cache", "list", "--json"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(value["artifacts"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn the_age_threshold_is_adjustable() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    // Idle, but only just.
+    let recent = kiln_now() - (5 * 24 * 60 * 60);
+    sandbox.age(PLANTED, recent);
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean", "--older-than", "30"])
+        .assert()
+        .success()
+        .stderr(contains("Nothing to remove"));
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean", "--older-than", "3"])
+        .assert()
+        .success()
+        .stderr(contains("would be removed"));
+}
+
+#[test]
+fn cache_clean_all_ignores_age() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    // Used seconds ago, and still condemned by `--all`.
+    sandbox.age(PLANTED, kiln_now());
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean", "--all", "--force"])
+        .assert()
+        .success()
+        .stderr(contains("Removed 1 runtime"));
+
+    assert!(!sandbox.entry_path(PLANTED).exists());
+}
+
+#[test]
+fn running_a_command_protects_its_runtime_from_eviction() {
+    let sandbox = ready_sandbox(RUNNABLE);
+    sandbox.plant_program(PLANTED, "node", "true");
+    sandbox.age(PLANTED, LONG_AGO);
+
+    // The whole point of tracking use rather than install time.
+    sandbox.kiln().args(["run", "node"]).assert().success();
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean"])
+        .assert()
+        .success()
+        .stderr(contains("Nothing to remove"));
+}
+
+#[test]
+fn listing_the_store_does_not_count_as_using_it() {
+    // Read-only commands must not keep an entry alive, or nothing would ever
+    // be collectable on a machine where someone runs `kiln list` in a prompt.
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.age(PLANTED, LONG_AGO);
+
+    sandbox.kiln().args(["cache", "list"]).assert().success();
+    // `doctor` warns about the missing project here; its status is not the point.
+    sandbox.kiln().arg("doctor").assert().code(exit::CONFIG);
+
+    sandbox
+        .kiln()
+        .args(["cache", "clean"])
+        .assert()
+        .success()
+        .stderr(contains("would be removed"));
+}
+
+#[test]
+fn cache_clean_on_an_empty_store_says_so() {
+    let sandbox = Sandbox::new();
+    sandbox
+        .kiln()
+        .args(["cache", "clean"])
+        .assert()
+        .success()
+        .stderr(contains("store is empty"));
+}
+
+/// Seconds since the Unix epoch.
+fn kiln_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }

@@ -202,9 +202,22 @@ pub enum CacheCommand {
     },
     /// Re-hash stored artifacts and report any that no longer match. [Phase 3]
     Verify,
-    /// Remove artifacts no project needs. [Phase 3]
+    /// Remove runtimes nothing has used recently.
+    #[command(long_about = "Remove runtimes nothing has used recently.\n\n\
+                            Kiln keeps no registry of projects, so it cannot know which \
+                            entries another project still needs. It records when each \
+                            entry was last used instead, and evicts by age. Anything \
+                            removed by mistake is reinstalled by `kiln install`.")]
     Clean {
-        /// Actually delete, rather than reporting what would be deleted.
+        /// Remove entries unused for this many days.
+        #[arg(long, value_name = "DAYS", default_value_t = 30)]
+        older_than: u64,
+
+        /// Remove every entry, however recently used.
+        #[arg(long, conflicts_with = "older_than")]
+        all: bool,
+
+        /// Actually delete. Without it, Kiln only reports what it would remove.
         #[arg(long)]
         force: bool,
     },

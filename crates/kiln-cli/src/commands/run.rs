@@ -36,6 +36,15 @@ pub fn run(args: &RunArgs, directory: &Path, ui: &Ui) -> Result<ExitCode> {
     );
     environment_state.require_ready()?;
 
+    // Recorded here rather than inside `activate`, so that read-only commands
+    // like `kiln list` do not make an entry look used just by describing it.
+    store.touch_all(
+        environment_state
+            .runtimes
+            .iter()
+            .filter_map(|r| r.entry.as_ref().map(|entry| &entry.digest)),
+    );
+
     let (program, arguments) = resolve_command(args, manifest)?;
 
     let mut environment = Environment::from_manifest(manifest);

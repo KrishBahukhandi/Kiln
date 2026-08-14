@@ -122,9 +122,10 @@ and runs `kiln install` gets byte-identical runtimes.
 | ✅ | `kiln run` | Runs a command in the environment. Transparent exit codes. |
 | ✅ | `kiln shell` | A shell with the project's runtimes in front. |
 | ✅ | `kiln cache list` | What is in the store and where it came from. `--json`. |
+| ✅ | `kiln cache clean` | Evicts runtimes nothing has used recently. `--force` to delete. |
 | ✅ | `kiln clean` | Removes scratch space and cached indexes. `--force` to delete. |
 | ✅ | `kiln version` | Version, platform and store location. `--json`. |
-| ⬜ | `kiln cache verify` / `cache clean` | Phase 3. |
+| ⬜ | `kiln cache verify` | Phase 3. |
 
 Unimplemented commands exit non-zero with a message naming the phase they belong
 to. They never pretend to succeed.
@@ -273,6 +274,25 @@ and installs nothing. The URL in `kiln.lock` is advisory; the digest is what is
 trusted, so a mirror is fine and different bytes are not.
 
 `KILN_HOME` relocates the whole tree, which is useful in CI.
+
+### Reclaiming disk
+
+```bash
+kiln cache clean                      # what has been idle 30+ days
+kiln cache clean --force              # actually remove it
+kiln cache clean --older-than 7 --force
+```
+
+Kiln keeps no registry of projects — that is deliberate — so it cannot know
+which entries some other checkout still needs. It records when each entry was
+last *used* instead, and evicts by age. Being wrong is cheap in only one
+direction: removing something still wanted costs a re-download, so the default
+is conservative and deleting takes `--force`.
+
+Use is tracked by Kiln rather than read from the filesystem's access time,
+which is unreliable in practice — `relatime` is the Linux default and `noatime`
+is common, so a runtime you use daily can look untouched. `kiln run` and
+`kiln shell` record use; read-only commands like `kiln list` do not.
 
 ## `kiln run` and `kiln shell`
 
@@ -428,7 +448,8 @@ question you can answer by reading the dependency graph.
 | 0 | Workspace, errors, config model, CLI skeleton | ✅ done |
 | 1 | `kiln init`, validation, project discovery | ✅ done |
 | 2 | Node.js and Python providers: resolve, download, verify, install | ✅ done |
-| 3 | Cache verification and garbage collection | next |
+| 3 | Cache garbage collection | ✅ done |
+| 3 | Cache verification (needs a directory-hash scheme) | next |
 | 8 | More runtimes | Go done; Rust, Bun, Deno next |
 | 4 | `kiln shell`, `kiln run` | ✅ done |
 | 5 | `kiln clean`, richer output | partial |

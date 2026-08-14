@@ -54,6 +54,12 @@ pub fn run(args: &ShellArgs, directory: &Path, ui: &Ui) -> Result<ExitCode> {
         Lockfile::read(&project.lockfile_path())?.as_ref(),
     );
     state.require_ready()?;
+    store.touch_all(
+        state
+            .runtimes
+            .iter()
+            .filter_map(|r| r.entry.as_ref().map(|entry| &entry.digest)),
+    );
 
     let shell = choose_shell(args.shell.as_deref())?;
 

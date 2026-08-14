@@ -214,8 +214,33 @@ insertion that is idempotent and safe against a concurrent Kiln installing the
 same artifact — whoever loses the race discards their copy and uses the winner's,
 which is sound precisely because the store is content-addressed.
 
-Phase 3 adds verification and garbage collection, both of which need the
+Garbage collection is implemented; verification is not, and still needs the
 directory-hashing scheme described above.
+
+### Why collection goes by age and not by reachability
+
+The question collection wants to answer is "which entries does some project
+still need?". Kiln cannot answer it, and the reason is a design choice rather
+than a gap: Kiln keeps no registry of projects. A lockfile on an unplugged
+drive, a checkout under a colleague's home directory, or a repository nobody has
+cloned yet are all invisible to it, and inventing a registry to fix that would
+make a deliberately stateless tool stateful.
+
+So Kiln records when each entry was last put to use and evicts by age, which
+answers a slightly different but much more honest question: *has anything needed
+this lately?*
+
+Use is recorded by Kiln rather than read from `atime`. `relatime` is the default
+on Linux and `noatime` is common, so access times can be hours stale or frozen
+entirely — and collection that deleted a runtime someone uses daily would be
+worse than no collection at all. The write is bounded to once per entry per
+hour, and happens only in `kiln run`, `kiln shell` and `kiln install`. Read-only
+commands deliberately do not count as use, or nothing would ever be collectable
+on a machine where `kiln list` runs from a shell prompt.
+
+Being wrong is cheap in exactly one direction — a needless eviction costs a
+re-download, a needless retention costs disk — so the default threshold is
+generous and deletion requires `--force`.
 
 ## Runtime providers
 

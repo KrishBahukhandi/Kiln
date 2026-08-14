@@ -386,6 +386,7 @@ mod tests {
             digest: Digest::of_bytes(HashAlgorithm::Sha256, b"x"),
             path: PathBuf::from("/store/x"),
             meta: None,
+            last_used: None,
         };
         let make = |cached: bool| InstalledRuntime {
             id: "node".into(),

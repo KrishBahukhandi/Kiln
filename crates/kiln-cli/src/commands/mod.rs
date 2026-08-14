@@ -1,6 +1,7 @@
 //! One module per command.
 
 pub mod cache;
+pub mod cache_clean;
 pub mod clean;
 pub mod doctor;
 pub mod init;

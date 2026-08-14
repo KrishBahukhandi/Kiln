@@ -33,4 +33,4 @@ pub mod archive;
 pub mod store;
 
 pub use archive::extract;
-pub use store::{ContentStore, EntryMeta, StoreEntry};
+pub use store::{ContentStore, EntryMeta, StoreEntry, unix_now};

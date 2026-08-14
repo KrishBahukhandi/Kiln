@@ -15,7 +15,11 @@ pub fn run(args: &CacheArgs, ui: &Ui) -> Result<()> {
     match &args.command {
         CacheCommand::List { json: as_json } => list(&store, ui, *as_json),
         CacheCommand::Verify => store.verify(&placeholder()).map(|_| ()),
-        CacheCommand::Clean { .. } => store.collect_garbage(&[]),
+        CacheCommand::Clean {
+            older_than,
+            all,
+            force,
+        } => crate::commands::cache_clean::run(*older_than, *all, *force, ui),
     }
 }
 

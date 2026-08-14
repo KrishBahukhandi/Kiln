@@ -35,6 +35,15 @@ const SHARD_LENGTH: usize = 2;
 const CONTENT_DIR: &str = "content";
 /// Provenance, inside an entry directory.
 const META_FILE: &str = "meta.toml";
+/// When this entry was last put to use, inside an entry directory.
+const LAST_USED_FILE: &str = "last-used";
+
+/// How stale a recorded use has to be before Kiln rewrites it.
+///
+/// Bounds the cost of tracking use to one tiny write per entry per hour, no
+/// matter how often `kiln run` is called. Garbage collection works in days, so
+/// an hour of imprecision is free.
+const TOUCH_INTERVAL_SECS: u64 = 60 * 60;
 
 /// What Kiln records about how an entry got here.
 ///
@@ -91,12 +100,31 @@ pub struct StoreEntry {
     pub path: PathBuf,
     /// Provenance, when it could be read.
     pub meta: Option<EntryMeta>,
+    /// When this entry was last used, in seconds since the Unix epoch.
+    ///
+    /// `None` for an entry installed before Kiln tracked this, which garbage
+    /// collection treats as "installed long ago" rather than "never used".
+    pub last_used: Option<u64>,
 }
 
 impl StoreEntry {
     /// The unpacked runtime — what goes on `PATH`.
     pub fn content_path(&self) -> PathBuf {
         self.path.join(CONTENT_DIR)
+    }
+
+    /// The best available answer to "when did anything last need this?".
+    ///
+    /// Falls back to the install time, so an entry from before use-tracking
+    /// existed still ages rather than living forever.
+    pub fn last_touched(&self) -> Option<u64> {
+        self.last_used
+            .or_else(|| self.meta.as_ref().map(|meta| meta.installed_unix))
+    }
+
+    /// How long ago this entry was last needed, in seconds.
+    pub fn idle_seconds(&self, now: u64) -> Option<u64> {
+        self.last_touched().map(|then| now.saturating_sub(then))
     }
 }
 
@@ -157,8 +185,43 @@ impl ContentStore {
         Some(StoreEntry {
             digest: digest.clone(),
             meta: read_meta(&path),
+            last_used: read_last_used(&path),
             path,
         })
+    }
+
+    /// Record that this entry was just put to use.
+    ///
+    /// Kiln tracks use itself rather than reading the filesystem's access time,
+    /// which is unreliable in practice: `relatime` is the default on Linux and
+    /// `noatime` is common, so `atime` can be hours stale or frozen entirely.
+    /// Garbage collection that deleted a runtime someone uses daily would be
+    /// worse than no garbage collection.
+    ///
+    /// Best effort and never fatal — a read-only store, a full disk, or a
+    /// concurrent Kiln are all fine reasons for this to do nothing. The cost of
+    /// losing a timestamp is that an entry looks staler than it is, which at
+    /// worst means re-downloading it.
+    pub fn touch(&self, digest: &Digest) {
+        let path = self.path_for(digest);
+        if !path.is_dir() {
+            return;
+        }
+
+        let now = unix_now();
+        if let Some(recorded) = read_last_used(&path)
+            && now.saturating_sub(recorded) < TOUCH_INTERVAL_SECS
+        {
+            return;
+        }
+        let _ = std::fs::write(path.join(LAST_USED_FILE), now.to_string());
+    }
+
+    /// Record use for several entries at once.
+    pub fn touch_all<'a>(&self, digests: impl IntoIterator<Item = &'a Digest>) {
+        for digest in digests {
+            self.touch(digest);
+        }
     }
 
     /// Move an unpacked runtime into the store under `digest`.
@@ -225,6 +288,7 @@ impl ContentStore {
         Ok(StoreEntry {
             digest: digest.clone(),
             meta: Some(meta.clone()),
+            last_used: None,
             path: target,
         })
     }
@@ -266,6 +330,7 @@ impl ContentStore {
                     entries.push(StoreEntry {
                         digest,
                         meta: read_meta(&entry),
+                        last_used: read_last_used(&entry),
                         path: entry,
                     });
                 }
@@ -273,6 +338,11 @@ impl ContentStore {
         }
         entries.sort_by(|a, b| a.digest.cmp(&b.digest));
         Ok(entries)
+    }
+
+    /// How much disk one entry occupies, in bytes.
+    pub fn entry_size(&self, digest: &Digest) -> u64 {
+        directory_size(&self.path_for(digest)).unwrap_or(0)
     }
 
     /// Total size of the store's contents, in bytes.
@@ -295,18 +365,55 @@ impl ContentStore {
         )
     }
 
-    /// Remove artifacts no longer reachable from any project. **Phase 3.**
-    pub fn collect_garbage(&self, _roots: &[Digest]) -> Result<()> {
-        Err(Error::not_implemented(
-            "Cache garbage collection",
-            "Phase 3 (cache)",
-        ))
+    /// Delete one entry.
+    pub fn remove(&self, digest: &Digest) -> Result<u64> {
+        let path = self.path_for(digest);
+        if !path.is_dir() {
+            return Ok(0);
+        }
+        let size = directory_size(&path).unwrap_or(0);
+
+        // Renamed out of the store first, so a concurrent reader walking the
+        // tree never sees an entry mid-deletion. Once the rename lands the
+        // entry is gone from the store's point of view, whether or not the
+        // recursive delete that follows finishes.
+        let condemned = path.with_file_name(format!(
+            ".removing-{}-{}",
+            digest.short(),
+            std::process::id()
+        ));
+        match std::fs::rename(&path, &condemned) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&condemned);
+            }
+            // Losing a race with another Kiln removing the same entry is a
+            // success: it is gone either way.
+            Err(_) if !path.exists() => return Ok(0),
+            Err(e) => return Err(Error::io("Could not remove the store entry", &path, e)),
+        }
+        Ok(size)
     }
 }
 
 fn read_meta(entry: &Path) -> Option<EntryMeta> {
     let text = std::fs::read_to_string(entry.join(META_FILE)).ok()?;
     toml::from_str(&text).ok()
+}
+
+fn read_last_used(entry: &Path) -> Option<u64> {
+    std::fs::read_to_string(entry.join(LAST_USED_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Seconds since the Unix epoch.
+pub fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// List a directory's children, sorted, so enumeration is deterministic.
@@ -650,15 +757,131 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_operations_say_so_and_name_the_phase() {
+    fn verification_still_says_which_phase_it_needs() {
         let store = ContentStore::new("/tmp/kiln-store");
-        let digest = digest_of(b"x");
-        for error in [
-            store.verify(&digest).unwrap_err(),
-            store.collect_garbage(&[]).unwrap_err(),
-        ] {
-            assert_eq!(error.kind(), kiln_core::ErrorKind::NotImplemented);
-            assert!(error.reason().unwrap().contains("Phase 3"));
+        let error = store.verify(&digest_of(b"x")).unwrap_err();
+        assert_eq!(error.kind(), kiln_core::ErrorKind::NotImplemented);
+        assert!(error.reason().unwrap().contains("Phase 3"));
+    }
+
+    #[test]
+    fn use_is_recorded_and_read_back() {
+        let fixture = Fixture::new();
+        let digest = digest_of(b"node");
+        fixture
+            .store
+            .insert(&fixture.stage("n", b"x"), &digest, &meta_for(&digest))
+            .unwrap();
+
+        assert!(fixture.store.get(&digest).unwrap().last_used.is_none());
+
+        fixture.store.touch(&digest);
+        let entry = fixture.store.get(&digest).unwrap();
+        assert!(entry.last_used.unwrap() > 1_700_000_000);
+        assert!(entry.idle_seconds(unix_now()).unwrap() < 5);
+    }
+
+    #[test]
+    fn touching_an_absent_entry_does_nothing() {
+        let fixture = Fixture::new();
+        fixture.store.touch(&digest_of(b"absent"));
+        assert!(fixture.store.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_entry_never_touched_ages_from_its_install_time() {
+        // Entries written before use-tracking existed must still age, or they
+        // would live in the store forever.
+        let fixture = Fixture::new();
+        let digest = digest_of(b"old");
+        fixture
+            .store
+            .insert(&fixture.stage("o", b"x"), &digest, &meta_for(&digest))
+            .unwrap();
+
+        let entry = fixture.store.get(&digest).unwrap();
+        assert!(entry.last_used.is_none());
+        assert_eq!(
+            entry.last_touched(),
+            Some(entry.meta.unwrap().installed_unix)
+        );
+    }
+
+    #[test]
+    fn recording_use_does_not_disturb_provenance() {
+        let fixture = Fixture::new();
+        let digest = digest_of(b"node");
+        fixture
+            .store
+            .insert(&fixture.stage("n", b"x"), &digest, &meta_for(&digest))
+            .unwrap();
+
+        let before = fixture.store.get(&digest).unwrap().meta;
+        fixture.store.touch(&digest);
+        assert_eq!(fixture.store.get(&digest).unwrap().meta, before);
+    }
+
+    #[test]
+    fn removing_an_entry_takes_it_out_of_the_store() {
+        let fixture = Fixture::new();
+        let digest = digest_of(b"doomed");
+        let content = fixture.staging.join("doomed");
+        std::fs::create_dir_all(&content).unwrap();
+        std::fs::write(content.join("payload"), [0u8; 2048]).unwrap();
+        fixture
+            .store
+            .insert(&content, &digest, &meta_for(&digest))
+            .unwrap();
+
+        let freed = fixture.store.remove(&digest).unwrap();
+        assert!(freed >= 2048, "should report what it freed, got {freed}");
+        assert!(!fixture.store.contains(&digest));
+        assert!(fixture.store.entries().unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_leaves_no_debris_behind() {
+        let fixture = Fixture::new();
+        let digest = digest_of(b"doomed");
+        fixture
+            .store
+            .insert(&fixture.stage("d", b"x"), &digest, &meta_for(&digest))
+            .unwrap();
+        fixture.store.remove(&digest).unwrap();
+
+        let shard = fixture
+            .store
+            .path_for(&digest)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let leftovers: Vec<_> = std::fs::read_dir(&shard)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .collect();
+        assert!(leftovers.is_empty(), "the shard should be empty");
+    }
+
+    #[test]
+    fn removing_something_that_is_not_there_succeeds() {
+        let fixture = Fixture::new();
+        assert_eq!(fixture.store.remove(&digest_of(b"never")).unwrap(), 0);
+    }
+
+    #[test]
+    fn removing_one_entry_leaves_the_others() {
+        let fixture = Fixture::new();
+        let keep = digest_of(b"keep");
+        let drop = digest_of(b"drop");
+        for (label, digest) in [("k", &keep), ("d", &drop)] {
+            fixture
+                .store
+                .insert(&fixture.stage(label, b"x"), digest, &meta_for(digest))
+                .unwrap();
         }
+
+        fixture.store.remove(&drop).unwrap();
+        assert!(fixture.store.contains(&keep));
+        assert_eq!(fixture.store.entries().unwrap().len(), 1);
     }
 }
