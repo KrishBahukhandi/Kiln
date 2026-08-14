@@ -1,0 +1,113 @@
+@import "tailwindcss";
+
+/*
+ * Kiln's visual language.
+ *
+ * Editorial, not dashboard: paper-toned ground, generous measure, hairline
+ * rules doing the work that boxes and shadows do elsewhere. Terminal blocks are
+ * insets holding the tool's real output, so they read as specimens set into a
+ * document rather than as decoration.
+ *
+ * One accent, warm — a kiln fires clay — against cool neutrals. Colour is used
+ * to mean something (a command, a link, a live value) and never to fill space.
+ *
+ * System fonts throughout. A site for a tool whose pitch is "no unnecessary
+ * dependencies" should not open with two web-font requests.
+ */
+
+/*
+ * `@theme` declares the tokens Tailwind builds utilities from. It is a build-
+ * time construct and is hoisted to a single `:root`, so a second `@theme`
+ * inside a media query does not become conditional — it simply overwrites the
+ * first, everywhere. Light lives here; dark is a plain CSS override below.
+ */
+@theme {
+  --color-paper: #fbfaf8;
+  --color-paper-sunk: #f3f1ec;
+  --color-ink: #17150f;
+  --color-ink-muted: #55504a;
+  --color-ink-faint: #736c62;
+  --color-rule: #e0dbd2;
+
+  --color-ember: #b8400c;
+  --color-ember-bright: #e8763a;
+
+  --color-terminal: #17150f;
+  --color-terminal-rule: #332e26;
+  --color-terminal-ink: #ded8ce;
+  --color-terminal-faint: #948d83;
+  --color-terminal-green: #8cbf74;
+  --color-terminal-red: #e88b78;
+  --color-terminal-cyan: #7fb8c8;
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+    monospace;
+}
+
+/*
+ * Dark mode redefines the same custom properties as ordinary CSS, which the
+ * generated utilities pick up because they all resolve through `var()`.
+ *
+ * The terminal is the one surface that inverts its relationship to the page: on
+ * paper it is a dark inset, in the dark it has to be *lifted* instead, or it
+ * disappears into the background and stops reading as a specimen at all.
+ */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-paper: #100f0d;
+    --color-paper-sunk: #1a1815;
+    --color-ink: #ece7de;
+    --color-ink-muted: #a49d93;
+    --color-ink-faint: #8a837a;
+    --color-rule: #2b2721;
+
+    --color-ember: #f08a4b;
+    --color-ember-bright: #f5a06a;
+
+    --color-terminal: #1c1a16;
+    --color-terminal-rule: #3a352c;
+    --color-terminal-ink: #e2ddd3;
+    --color-terminal-faint: #948d83;
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+  /* The sticky masthead must not cover the heading you jumped to. */
+  scroll-padding-top: 5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--color-ember);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ember);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -109,6 +109,23 @@ Name tests after the behaviour they pin down, not the function they call:
 Tests that need the network must be `#[ignore]`d. `cargo test` has to work on a
 plane.
 
+## The website
+
+`website/` is a separate project with its own `kiln.toml` and its own
+`package.json`. It never imports from the Rust workspace and the workspace never
+knows it exists — `cargo test` does not build it, and changing it cannot break
+the CLI.
+
+```bash
+cd website
+kiln install        # Kiln installs the Node the site is pinned to
+kiln run build
+```
+
+If you change something a user sees, check the site still tells the truth. The
+terminal blocks are real output, and they are the most convincing thing on the
+page precisely because they are.
+
 ## Dependencies
 
 The tree is small on purpose. A new dependency needs a reason in the pull

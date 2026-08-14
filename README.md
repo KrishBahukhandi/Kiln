@@ -465,6 +465,23 @@ remote execution, or replacing containers.
 There is none, and none is planned. If that ever changes it will be opt-in,
 documented, and disableable.
 
+## The website
+
+`website/` holds the marketing and documentation site — React, TypeScript, Vite
+and Tailwind, entirely independent of the Rust workspace.
+
+It has its own `kiln.toml`, so Kiln builds its own site:
+
+```bash
+cd website
+kiln install
+kiln run build
+```
+
+Every terminal block on the page is output the tool actually produces. There are
+no images, no web fonts and no third-party requests — a site arguing for fewer
+dependencies should not open with three of them.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a runtime means writing one

@@ -1,0 +1,15 @@
+# The website's own development environment.
+#
+# Kiln builds its own site. `kiln install` here, then `kiln run build`.
+
+[project]
+name = "kiln-website"
+description = "The Kiln marketing and documentation site."
+
+[runtime]
+node = "22.14.0"
+
+[commands]
+dev = "npm run dev"
+build = "npm run build"
+preview = "npm run preview"
