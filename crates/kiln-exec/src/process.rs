@@ -511,9 +511,21 @@ mod tests {
         let mut environment = Environment::new();
         environment.prepend_path(bin.path());
 
-        let error = run("python", &[], &environment, bin.path()).unwrap_err();
+        // The name has to be one no machine can have. `prepend_path` prepends
+        // to the *inherited* `PATH` — that is the whole design — so a real
+        // program name only proves absence on a host that happens not to have
+        // it. This test previously asked for `python`, which macOS has not
+        // shipped for years and every CI runner provides, so it passed locally
+        // and failed on Linux by finding the system one and succeeding.
+        const ABSENT: &str = "kiln-test-program-that-does-not-exist";
+
+        let error = run(ABSENT, &[], &environment, bin.path()).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NotFound);
-        assert!(error.summary().contains("`python` is not available"));
+        assert!(
+            error
+                .summary()
+                .contains(&format!("`{ABSENT}` is not available"))
+        );
 
         let expected = error.expectation().expect("a list of what is available");
         assert!(expected.contains("node"), "{expected}");
