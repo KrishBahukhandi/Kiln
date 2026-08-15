@@ -23,6 +23,7 @@ mod exit {
     pub const CONFLICT: i32 = 8;
     pub const UNSUPPORTED: i32 = 4;
     pub const NETWORK: i32 = 5;
+    pub const VERIFICATION: i32 = 6;
     pub const NOT_IMPLEMENTED: i32 = 9;
 }
 
@@ -84,6 +85,25 @@ impl Sandbox {
                  artifact_bytes = 1024\ninstalled_unix = {now}\n",
                 now = kiln_now(),
             ),
+        )
+        .unwrap();
+    }
+
+    /// Record a tree manifest for a planted entry, as a real install would.
+    ///
+    /// Planting alone deliberately leaves none, which is what an entry from
+    /// before Kiln recorded manifests looks like. Sealing is the separate step
+    /// so a test can choose which of the two it needs.
+    fn seal(&self, digest_hex: &str) {
+        let entry = self.entry_path(digest_hex);
+        let manifest = kiln_cache::tree::manifest_of(&entry.join("content")).unwrap();
+        std::fs::write(entry.join("tree.manifest"), manifest.render()).unwrap();
+
+        let meta = entry.join("meta.toml");
+        let existing = std::fs::read_to_string(&meta).unwrap();
+        std::fs::write(
+            &meta,
+            format!("{existing}tree_digest = \"{}\"\n", manifest.digest()),
         )
         .unwrap();
     }
@@ -168,6 +188,9 @@ const MINIMAL: &str = "[project]\nname = \"app\"\n\n[runtime]\nnode = \"22.14.0\
 /// A digest that is valid in shape but corresponds to nothing real.
 const PLANTED: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 
+/// A second one, for tests that need two entries in the store at once.
+const PLANTED_B: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
 /// The platform key for the machine running the tests.
 fn platform_key() -> String {
     let output = Command::cargo_bin("kiln")
@@ -202,20 +225,19 @@ fn help_marks_the_commands_that_are_not_built_yet() {
     let assert = sandbox.kiln().arg("--help").assert().success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
 
-    // Honesty in the help text, not just in the error. Every top-level command
-    // works now, so the marker has moved down to the cache subcommands.
-    assert!(
-        !stdout.contains("[Phase 4]"),
-        "run and shell are implemented"
-    );
-    assert!(!stdout.contains("[Phase 5]"), "clean is implemented");
-
+    // Every command in the tree is now built, so the invariant has flipped:
+    // nothing may advertise itself as pending. This still earns its keep — it
+    // is what fails if a future stub ships with a phase marker instead of an
+    // implementation.
     let cache = sandbox.kiln().args(["cache", "--help"]).assert().success();
     let cache_help = String::from_utf8(cache.get_output().stdout.clone()).unwrap();
-    assert!(
-        cache_help.contains("[Phase 3]"),
-        "unbuilt commands must say so"
-    );
+
+    for help in [&stdout, &cache_help] {
+        assert!(
+            !help.contains("[Phase "),
+            "a command advertising a phase marker is not implemented:\n{help}"
+        );
+    }
 }
 
 #[test]
@@ -770,18 +792,192 @@ fn cache_list_json_is_valid_on_an_empty_store() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn unbuilt_commands_fail_loudly_and_name_their_phase() {
+fn no_command_reports_itself_as_unimplemented() {
     let sandbox = Sandbox::new();
     sandbox.write("kiln.toml", MINIMAL);
 
-    // Only `cache verify` is left; it needs a directory-hash scheme first.
+    // Exit code 9 is reserved for "Kiln has not built this yet". Nothing in the
+    // command tree should be able to produce it any more, and a stub that
+    // silently succeeded instead would be worse than one that failed.
+    for args in [
+        vec!["cache", "verify"],
+        vec!["cache", "list"],
+        vec!["cache", "clean"],
+        vec!["list"],
+        vec!["doctor"],
+        vec!["clean"],
+    ] {
+        let code = sandbox
+            .kiln()
+            .args(&args)
+            .assert()
+            .get_output()
+            .status
+            .code();
+        assert_ne!(
+            code,
+            Some(exit::NOT_IMPLEMENTED),
+            "`kiln {}` is still a stub",
+            args.join(" ")
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cache verify
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verifying_a_sealed_entry_reports_it_intact() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.seal(PLANTED);
+
     sandbox
         .kiln()
         .args(["cache", "verify"])
         .assert()
-        .code(exit::NOT_IMPLEMENTED)
-        .stderr(contains("not implemented"))
-        .stderr(contains("Phase 3"));
+        .success()
+        .stderr(contains("intact"));
+}
+
+#[test]
+fn verifying_reports_a_corrupted_file_and_exits_nonzero() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.seal(PLANTED);
+
+    // Same length, different bytes: the corruption a size check cannot see.
+    std::fs::write(
+        sandbox.entry_path(PLANTED).join("content/bin/fake"),
+        b"#!/bin/SH\n",
+    )
+    .unwrap();
+
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        .code(exit::VERIFICATION)
+        .stderr(contains("bin/fake"))
+        .stderr(contains("same size, different contents"));
+}
+
+#[test]
+fn verifying_reports_a_deleted_file() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.seal(PLANTED);
+    std::fs::remove_file(sandbox.entry_path(PLANTED).join("content/bin/fake")).unwrap();
+
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        .code(exit::VERIFICATION)
+        .stderr(contains("is gone"));
+}
+
+#[test]
+fn an_entry_without_a_manifest_is_unverifiable_not_intact() {
+    let sandbox = Sandbox::new();
+    // Planted but never sealed: an entry from before Kiln recorded manifests.
+    sandbox.plant(PLANTED, "node", "22.14.0");
+
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        // Not an error — Kiln simply cannot tell, and says so.
+        .success()
+        .stderr(contains("could not be checked"));
+}
+
+#[test]
+fn a_damaged_entry_does_not_stop_the_others_being_reported() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.plant(PLANTED_B, "python", "3.13.15");
+    sandbox.seal(PLANTED);
+    sandbox.seal(PLANTED_B);
+    std::fs::remove_file(sandbox.entry_path(PLANTED).join("content/bin/fake")).unwrap();
+
+    // A store with one bad runtime must still tell you about the good one.
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        .code(exit::VERIFICATION)
+        .stderr(contains("node 22.14.0"))
+        .stderr(contains("python 3.13.15"));
+}
+
+#[test]
+fn verify_can_be_narrowed_to_one_runtime() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.plant(PLANTED_B, "python", "3.13.15");
+    sandbox.seal(PLANTED);
+    sandbox.seal(PLANTED_B);
+    std::fs::remove_file(sandbox.entry_path(PLANTED_B).join("content/bin/fake")).unwrap();
+
+    // Asking about the healthy one must not fail because of the other.
+    sandbox
+        .kiln()
+        .args(["cache", "verify", "node"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn verifying_something_absent_says_what_to_run() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+
+    sandbox
+        .kiln()
+        .args(["cache", "verify", "ruby"])
+        .assert()
+        .code(exit::NOT_FOUND)
+        .stderr(contains("kiln cache list"));
+}
+
+#[test]
+fn verify_json_is_valid_on_an_empty_store() {
+    let sandbox = Sandbox::new();
+    let assert = sandbox
+        .kiln()
+        .args(["cache", "verify", "--json"])
+        .assert()
+        .success();
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&assert.get_output().stdout).expect("--json must always parse");
+    assert_eq!(value["entries"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn verify_json_names_the_damaged_paths() {
+    let sandbox = Sandbox::new();
+    sandbox.plant(PLANTED, "node", "22.14.0");
+    sandbox.seal(PLANTED);
+    std::fs::write(
+        sandbox.entry_path(PLANTED).join("content/bin/fake"),
+        b"tampered",
+    )
+    .unwrap();
+
+    let assert = sandbox
+        .kiln()
+        .args(["cache", "verify", "--json"])
+        .assert()
+        .code(exit::VERIFICATION);
+
+    let value: serde_json::Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let entry = &value["entries"][0];
+    assert_eq!(entry["status"], "damaged");
+    assert_eq!(entry["differences"][0]["path"], "bin/fake");
+    assert_eq!(entry["differences"][0]["kind"], "size_changed");
 }
 
 #[test]

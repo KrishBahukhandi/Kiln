@@ -14,7 +14,10 @@ pub fn run(args: &CacheArgs, ui: &Ui) -> Result<()> {
 
     match &args.command {
         CacheCommand::List { json: as_json } => list(&store, ui, *as_json),
-        CacheCommand::Verify => store.verify(&placeholder()).map(|_| ()),
+        CacheCommand::Verify {
+            entries,
+            json: as_json,
+        } => crate::commands::cache_verify::run(entries, *as_json, ui),
         CacheCommand::Clean {
             older_than,
             all,
@@ -86,10 +89,4 @@ fn list(store: &kiln_cache::ContentStore, ui: &Ui, as_json: bool) -> Result<()> 
         store.root().display()
     ));
     Ok(())
-}
-
-/// `cache verify` will take a digest once there is anything to verify; until
-/// then the call exists to route through the store and report Phase 3 honestly.
-fn placeholder() -> kiln_core::Digest {
-    kiln_core::Digest::of_bytes(kiln_core::HashAlgorithm::Sha256, b"")
 }

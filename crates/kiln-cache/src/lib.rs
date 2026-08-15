@@ -20,17 +20,16 @@
 //! has been verified, so a partially written artifact is never reachable under a
 //! name that says it is complete.
 //!
-//! # Status
-//!
-//! This release implements the layout, lookup, enumeration, extraction and
-//! atomic insertion. Verification and garbage collection arrive in Phase 3:
-//! both need a canonical way to hash a directory tree, and that decision fixes
-//! the meaning of "this entry is intact" permanently. See `docs/architecture.md`.
+//! Verification works from a manifest of the unpacked tree, recorded at install
+//! time from an archive whose digest had just been checked. See [`tree`] for
+//! what that manifest records and, just as importantly, what it does not.
 
 #![forbid(unsafe_code)]
 
 pub mod archive;
 pub mod store;
+pub mod tree;
 
 pub use archive::extract;
-pub use store::{ContentStore, EntryMeta, StoreEntry, unix_now};
+pub use store::{ContentStore, EntryMeta, StoreEntry, Verification, unix_now};
+pub use tree::{Difference, DifferenceKind, TreeManifest};

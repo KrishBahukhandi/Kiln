@@ -200,8 +200,26 @@ pub enum CacheCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Re-hash stored artifacts and report any that no longer match. [Phase 3]
-    Verify,
+    /// Re-read stored runtimes and report any that no longer match.
+    #[command(
+        long_about = "Re-read stored runtimes and report any that no longer match.\n\n\
+                            Every file is hashed and compared against the manifest Kiln \
+                            recorded when the runtime was installed, so corruption that \
+                            preserves a file's length is caught too. This reads the whole \
+                            store from disk and is not fast.\n\n\
+                            It detects damage, not tampering: the manifest sits beside the \
+                            tree it describes, so anything able to rewrite one can rewrite \
+                            the other."
+    )]
+    Verify {
+        /// Verify only these entries. Accepts a digest or a runtime name.
+        #[arg(value_name = "ENTRY")]
+        entries: Vec<String>,
+
+        /// Emit machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove runtimes nothing has used recently.
     #[command(long_about = "Remove runtimes nothing has used recently.\n\n\
                             Kiln keeps no registry of projects, so it cannot know which \

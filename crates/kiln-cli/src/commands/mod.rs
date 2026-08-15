@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod cache_clean;
+pub mod cache_verify;
 pub mod clean;
 pub mod doctor;
 pub mod init;

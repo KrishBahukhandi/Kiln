@@ -4,8 +4,10 @@
 //!
 //! ```text
 //! store/sha256/9f/9f86d081…/
-//!   meta.toml     provider, version, and the URL it was fetched from
-//!   content/      the unpacked runtime
+//!   meta.toml       provider, version, and the URL it was fetched from
+//!   tree.manifest   every path in `content/`, as unpacked
+//!   last-used       when anything last needed this entry
+//!   content/        the unpacked runtime
 //! ```
 //!
 //! Naming an entry by its source archive rather than by a hash of the unpacked
@@ -14,8 +16,13 @@
 //! tree is a deterministic function of it. Kiln verifies the thing upstream
 //! actually attests to.
 //!
-//! `meta.toml` sits beside the content rather than inside it, so provenance is
-//! recorded without contaminating the runtime with files it did not ship.
+//! The consequence is that an entry's name cannot say whether the tree still
+//! matches, since the archive is gone by then. `tree.manifest` answers that
+//! instead — see [`crate::tree`].
+//!
+//! Everything except `content/` sits beside the runtime rather than inside it,
+//! so Kiln can record what it needs without contaminating the runtime with
+//! files it did not ship.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +30,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kiln_core::error::{Error, IoResultExt, Result};
 use kiln_core::{Digest, HashAlgorithm};
 use serde::{Deserialize, Serialize};
+
+use crate::tree::{Difference, TreeManifest, manifest_of};
 
 /// Number of leading hex characters used as a fan-out directory.
 ///
@@ -37,6 +46,11 @@ const CONTENT_DIR: &str = "content";
 const META_FILE: &str = "meta.toml";
 /// When this entry was last put to use, inside an entry directory.
 const LAST_USED_FILE: &str = "last-used";
+/// What the unpacked tree looked like on arrival, inside an entry directory.
+///
+/// Beside `content/` rather than in it, for the same reason as `meta.toml`: a
+/// runtime must not gain files it did not ship.
+const TREE_FILE: &str = "tree.manifest";
 
 /// How stale a recorded use has to be before Kiln rewrites it.
 ///
@@ -66,6 +80,15 @@ pub struct EntryMeta {
     /// A bare integer rather than a formatted timestamp, so the store needs no
     /// date library and no timezone to be read back.
     pub installed_unix: u64,
+
+    /// The digest of this entry's [`TreeManifest`], standing for the whole
+    /// unpacked tree.
+    ///
+    /// Optional because entries installed before Kiln recorded manifests have
+    /// none, and are reported as unverifiable rather than as damaged. Defaulted
+    /// on read so an old `meta.toml` still parses.
+    #[serde(default)]
+    pub tree_digest: Option<String>,
 }
 
 impl EntryMeta {
@@ -87,6 +110,7 @@ impl EntryMeta {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
+            tree_digest: None,
         }
     }
 }
@@ -125,6 +149,45 @@ impl StoreEntry {
     /// How long ago this entry was last needed, in seconds.
     pub fn idle_seconds(&self, now: u64) -> Option<u64> {
         self.last_touched().map(|then| now.saturating_sub(then))
+    }
+}
+
+/// What checking one entry found.
+///
+/// "Kiln could not tell" is a separate answer from "the entry is fine", and
+/// keeping them apart is the point of this type. Collapsing them into a boolean
+/// would make an unverifiable entry report as healthy, which is the one thing a
+/// verification command must never do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verification {
+    /// Every recorded path is present and unchanged.
+    Intact {
+        /// How many regular files were checked.
+        files: usize,
+        /// How many bytes were read.
+        bytes: u64,
+    },
+    /// The entry exists, but there is nothing to check it against.
+    Unverifiable {
+        /// Why not, phrased to follow "Kiln cannot verify this entry because…".
+        reason: String,
+    },
+    /// The tree no longer matches what was installed.
+    Damaged {
+        /// Every path that differs, in path order.
+        differences: Vec<Difference>,
+    },
+}
+
+impl Verification {
+    /// Whether this entry is known to be good.
+    pub fn is_intact(&self) -> bool {
+        matches!(self, Verification::Intact { .. })
+    }
+
+    /// Whether this entry is known to be bad.
+    pub fn is_damaged(&self) -> bool {
+        matches!(self, Verification::Damaged { .. })
     }
 }
 
@@ -257,12 +320,25 @@ impl ContentStore {
         std::fs::create_dir_all(&staging)
             .io_context("Could not stage the store entry", &staging)?;
 
-        std::fs::rename(content, staging.join(CONTENT_DIR)).map_err(|e| {
+        let staged_content = staging.join(CONTENT_DIR);
+        std::fs::rename(content, &staged_content).map_err(|e| {
             let _ = std::fs::remove_dir_all(&staging);
             Error::io("Could not stage the unpacked runtime", content, e)
         })?;
 
-        let rendered = toml::to_string_pretty(meta)
+        // Record what the tree looks like *now*, while the archive it came from
+        // has just been verified. A manifest taken at any later moment would
+        // only be able to attest that the tree matches itself.
+        let manifest = manifest_of(&staged_content).inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&staging);
+        })?;
+        std::fs::write(staging.join(TREE_FILE), manifest.render())
+            .io_context("Could not record the runtime's file manifest", &staging)?;
+
+        let mut meta = meta.clone();
+        meta.tree_digest = Some(manifest.digest().to_string());
+
+        let rendered = toml::to_string_pretty(&meta)
             .map_err(|e| Error::internal("Could not record the store entry").with_source(e))?;
         std::fs::write(staging.join(META_FILE), rendered)
             .io_context("Could not record the store entry", &staging)?;
@@ -354,15 +430,58 @@ impl ContentStore {
         Ok(total)
     }
 
-    /// Re-hash a stored artifact and compare it with its name. **Phase 3.**
+    /// Re-walk a stored entry and compare it against the manifest recorded when
+    /// it was installed.
     ///
-    /// Needs a canonical way to hash a directory tree, which is a decision worth
-    /// making carefully: it fixes the meaning of "this entry is intact" forever.
-    pub fn verify(&self, _digest: &Digest) -> Result<()> {
-        Err(
-            Error::not_implemented("Cache verification", "Phase 3 (cache)")
-                .hint("`kiln cache list` shows what is installed and where it came from"),
-        )
+    /// Reads every byte of the entry, because a digest is the only thing that
+    /// separates a corrupted file from an intact one of the same length.
+    ///
+    /// Returns `Ok` for a damaged entry as well as an intact one: damage is a
+    /// finding this command exists to report, not a failure to perform it. The
+    /// `Err` cases are the ones where Kiln could not look — an unreadable
+    /// directory, an unparseable manifest.
+    pub fn verify(&self, digest: &Digest) -> Result<Verification> {
+        let path = self.path_for(digest);
+        if !self.contains(digest) {
+            return Err(
+                Error::not_found(format!("The store has no entry {}", digest.short()))
+                    .because("Nothing is installed under that digest.")
+                    .command("kiln cache list"),
+            );
+        }
+
+        let manifest_path = path.join(TREE_FILE);
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            return Ok(Verification::Unverifiable {
+                reason: "it was installed before Kiln recorded file manifests".into(),
+            });
+        };
+
+        let recorded = TreeManifest::parse(&text)?;
+
+        // The manifest is not a signature — it lives beside what it describes —
+        // but checking it against the digest in `meta.toml` still catches the
+        // manifest itself being truncated, which would otherwise show up as a
+        // tree full of missing files.
+        if let Some(expected) = read_meta(&path).and_then(|meta| meta.tree_digest)
+            && recorded.digest().to_string() != expected
+        {
+            return Ok(Verification::Unverifiable {
+                reason: "its file manifest does not match the digest recorded for it".into(),
+            });
+        }
+
+        let actual = manifest_of(&path.join(CONTENT_DIR))?;
+        let differences = recorded.compare(&actual);
+
+        Ok(if differences.is_empty() {
+            Verification::Intact {
+                files: recorded.file_count(),
+                bytes: recorded.total_bytes(),
+            }
+        } else {
+            Verification::Damaged { differences }
+        })
     }
 
     /// Delete one entry.
@@ -756,12 +875,116 @@ mod tests {
         assert!(entry.content_path().join("bin/node").is_file());
     }
 
+    /// A fixture with one runtime installed, ready to be tampered with.
+    fn installed() -> (Fixture, Digest) {
+        let fixture = Fixture::new();
+        let digest = digest_of(b"node");
+        fixture
+            .store
+            .insert(
+                &fixture.stage("n", b"#!/bin/sh\n"),
+                &digest,
+                &meta_for(&digest),
+            )
+            .unwrap();
+        (fixture, digest)
+    }
+
     #[test]
-    fn verification_still_says_which_phase_it_needs() {
-        let store = ContentStore::new("/tmp/kiln-store");
-        let error = store.verify(&digest_of(b"x")).unwrap_err();
-        assert_eq!(error.kind(), kiln_core::ErrorKind::NotImplemented);
-        assert!(error.reason().unwrap().contains("Phase 3"));
+    fn a_freshly_installed_entry_verifies() {
+        let (fixture, digest) = installed();
+        let verification = fixture.store.verify(&digest).unwrap();
+
+        assert_eq!(
+            verification,
+            Verification::Intact {
+                files: 1,
+                bytes: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn installing_records_a_manifest_beside_the_content() {
+        let (fixture, digest) = installed();
+        let entry = fixture.store.path_for(&digest);
+
+        assert!(entry.join(TREE_FILE).is_file());
+        // Beside, never inside: a runtime must not gain files it did not ship.
+        assert!(!entry.join(CONTENT_DIR).join(TREE_FILE).exists());
+    }
+
+    #[test]
+    fn the_manifest_digest_is_recorded_in_the_metadata() {
+        let (fixture, digest) = installed();
+        let meta = fixture.store.get(&digest).unwrap().meta.unwrap();
+        let recorded = meta.tree_digest.expect("a fresh install records one");
+
+        let text =
+            std::fs::read_to_string(fixture.store.path_for(&digest).join(TREE_FILE)).unwrap();
+        assert_eq!(
+            TreeManifest::parse(&text).unwrap().digest().to_string(),
+            recorded
+        );
+    }
+
+    #[test]
+    fn a_corrupted_file_is_reported_as_damage_not_as_an_error() {
+        let (fixture, digest) = installed();
+        let file = fixture.store.content_path_for(&digest).join("bin/node");
+
+        // Same length, different bytes — what bit-rot looks like, and what a
+        // size-only check would call healthy.
+        std::fs::write(&file, b"#!/bin/SH\n").unwrap();
+
+        let verification = fixture.store.verify(&digest).unwrap();
+        let Verification::Damaged { differences } = verification else {
+            panic!("corruption must be reported, not swallowed");
+        };
+        assert_eq!(differences.len(), 1);
+        assert_eq!(differences[0].path, "bin/node");
+    }
+
+    #[test]
+    fn an_entry_installed_before_manifests_existed_is_unverifiable() {
+        let (fixture, digest) = installed();
+        std::fs::remove_file(fixture.store.path_for(&digest).join(TREE_FILE)).unwrap();
+
+        // The one answer that must never collapse into "intact".
+        let verification = fixture.store.verify(&digest).unwrap();
+        assert!(!verification.is_intact());
+        assert!(!verification.is_damaged());
+    }
+
+    #[test]
+    fn a_truncated_manifest_is_unverifiable_rather_than_a_ruined_tree() {
+        let (fixture, digest) = installed();
+        let manifest = fixture.store.path_for(&digest).join(TREE_FILE);
+
+        // Losing the body of the manifest would otherwise report every file in
+        // the runtime as unexpected, which points at the wrong culprit.
+        std::fs::write(&manifest, "kiln-tree 1\n").unwrap();
+
+        let verification = fixture.store.verify(&digest).unwrap();
+        assert!(matches!(verification, Verification::Unverifiable { .. }));
+    }
+
+    #[test]
+    fn verifying_something_that_is_not_installed_says_so() {
+        let fixture = Fixture::new();
+        let error = fixture.store.verify(&digest_of(b"absent")).unwrap_err();
+        assert_eq!(error.kind(), kiln_core::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn metadata_from_before_manifests_still_parses() {
+        // An old `meta.toml` has no `tree_digest` key at all. Failing to read it
+        // would make every pre-existing entry unusable, not merely unverifiable.
+        let text = "provider = \"node\"\nversion = \"22.14.0\"\n\
+                    url = \"https://nodejs.org/x.tar.gz\"\ndigest = \"sha256:ab\"\n\
+                    artifact_bytes = 10\ninstalled_unix = 1700000000\n";
+        let meta: EntryMeta = toml::from_str(text).unwrap();
+        assert_eq!(meta.tree_digest, None);
     }
 
     #[test]

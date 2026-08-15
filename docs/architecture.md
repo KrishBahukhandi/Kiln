@@ -191,7 +191,7 @@ directory tree needs a canonical traversal, a decision about metadata, and a
 commitment that outlives every entry ever written. The archive's digest is
 already published and attested to by the vendor, and the unpacked tree is a
 deterministic function of it — so Kiln verifies the thing upstream actually
-signs for, and Phase 3 can define tree hashing without invalidating the store.
+signs for, and the store never had to commit to a tree-hashing scheme to exist.
 
 **Why `staging/` is a sibling of `store/`.** Promoting a verified artifact must be
 a `rename(2)` within one filesystem, which is atomic. Staging under `/tmp` would
@@ -214,8 +214,32 @@ insertion that is idempotent and safe against a concurrent Kiln installing the
 same artifact — whoever loses the race discards their copy and uses the winner's,
 which is sound precisely because the store is content-addressed.
 
-Garbage collection is implemented; verification is not, and still needs the
-directory-hashing scheme described above.
+Garbage collection and verification are both implemented.
+
+### What "this entry is intact" means
+
+Because an entry is named by its archive's digest, the name cannot answer
+whether the unpacked tree still matches — the archive is gone. So Kiln records
+the answer at the one moment it is knowable: immediately after extracting an
+archive whose published digest has just been checked, it walks the result and
+writes `tree.manifest` beside `content/`. `kiln cache verify` walks the tree
+again and compares.
+
+The manifest records, per path: file size, the sha256 of the contents, whether
+any execute bit is set, and a symlink's target unfollowed. Directories are
+recorded so that losing an empty one is still noticed.
+
+It deliberately records neither modification times nor full permission bits.
+Neither survives a `cp -a`, a restored backup, or a different `tar`, and neither
+affects whether a runtime works — so recording them would make verification fail
+for reasons nobody could act on, which is how a check gets ignored. The
+executable bit is kept because losing it is the one permission change that
+actually breaks a runtime, and it is invisible to a content hash.
+
+This detects corruption, not tampering. The manifest lives beside the tree it
+describes, so whatever can rewrite one can rewrite the other. Detecting a
+deliberate substitution needs an attestation from outside the store; see
+`SECURITY.md`.
 
 ### Why collection goes by age and not by reachability
 

@@ -88,6 +88,14 @@ worse than none.
 - **No mirror support.** There is deliberately no way to redirect Kiln at a
   different host, because doing so would also redirect where it learns digests
   from. Phase 7 will add it properly, with the checksum source pinned separately.
+- **`kiln cache verify` detects corruption, not tampering.** It compares each
+  stored runtime against `tree.manifest`, written when the archive was unpacked
+  and its digest had just checked out. That manifest lives in the same directory
+  as the tree it describes, so anything with write access to one has write
+  access to the other: it catches bit-rot, truncation and accidental edits, and
+  it would not catch a deliberate substitution that updated both. Making that
+  detectable needs an attestation from outside the store, which is the same
+  missing piece as signature verification above.
 - **No sandboxing.** A runtime Kiln installs runs with your full user
   permissions, exactly as it would if you installed it yourself. Kiln reproduces
   environments; it does not contain them.

@@ -125,10 +125,10 @@ and runs `kiln install` gets byte-identical runtimes.
 | ✅ | `kiln cache clean` | Evicts runtimes nothing has used recently. `--force` to delete. |
 | ✅ | `kiln clean` | Removes scratch space and cached indexes. `--force` to delete. |
 | ✅ | `kiln version` | Version, platform and store location. `--json`. |
-| ⬜ | `kiln cache verify` | Phase 3. |
+| ✅ | `kiln cache verify` | Re-reads the store and reports any runtime that changed. `--json`. |
 
-Unimplemented commands exit non-zero with a message naming the phase they belong
-to. They never pretend to succeed.
+Every command in the tree is implemented. Nothing exits with "not implemented",
+and nothing pretends to succeed.
 
 ### Runtimes
 
@@ -449,7 +449,7 @@ question you can answer by reading the dependency graph.
 | 1 | `kiln init`, validation, project discovery | ✅ done |
 | 2 | Node.js and Python providers: resolve, download, verify, install | ✅ done |
 | 3 | Cache garbage collection | ✅ done |
-| 3 | Cache verification (needs a directory-hash scheme) | next |
+| 3 | Cache verification | ✅ done |
 | 8 | More runtimes | Go done; Rust, Bun, Deno next |
 | 4 | `kiln shell`, `kiln run` | ✅ done |
 | 5 | `kiln clean`, richer output | partial |

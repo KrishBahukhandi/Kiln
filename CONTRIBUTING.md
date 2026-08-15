@@ -140,12 +140,23 @@ the same commit.
 
 ## Where to start
 
-Phase 3 is the next milestone: cache verification and garbage collection. Both
-need a canonical way to hash a directory tree, and that decision fixes the
-meaning of "this entry is intact" permanently — so it is worth discussing in an
-issue before any code is written. [`docs/architecture.md`](docs/architecture.md)
-describes the constraints.
+Every command in the tree is implemented, so the open work is depth rather than
+breadth. In rough order of how much it is missed:
 
-Garbage collection additionally needs an answer to "which store entries are
-still reachable?", and the honest answer spans projects a single command cannot
-see. Worth designing before building.
+- **More runtimes.** Rust, Bun and Deno. One file each, and the fastest way to
+  learn the codebase — see "Adding a runtime" above.
+- **Publisher signatures.** The largest real gap. Kiln verifies digests, which
+  makes it trust-on-first-use; see [`SECURITY.md`](SECURITY.md). This needs a
+  design discussion before code, because where a signature is learned from
+  matters more than how it is checked.
+- **Services.** `[services]` in `kiln.toml` is parsed and reported but nothing
+  manages it. Doing it properly means container lifecycle, ports and health
+  checks — a phase, not a patch.
+- **Windows.** `Os::Windows` exists so lockfiles stay portable across a team,
+  but no provider builds for it, and `.zip` handling and `PATH` semantics are
+  both unwritten.
+
+Two decisions are already made and should not be relitigated without a reason:
+garbage collection evicts by last use rather than by reachability, and
+verification compares against a manifest recorded at install rather than a hash
+of the tree. [`docs/architecture.md`](docs/architecture.md) says why for both.
