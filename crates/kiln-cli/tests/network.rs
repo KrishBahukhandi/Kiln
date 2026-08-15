@@ -601,3 +601,96 @@ fn go_locks_for_every_platform_including_musl() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Deno — the zip path
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "downloads from dl.deno.land"]
+fn deno_installs_and_runs() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ndeno = \"2\"\n",
+    );
+
+    sandbox.kiln().arg("install").assert().success();
+
+    // The one runtime that exercises zip extraction end to end, and the one
+    // where the executable bit has to be recovered from the archive's external
+    // attributes rather than from a tar header.
+    let deno = find_binary(&sandbox.home.path().join("store"), "deno").expect("deno on disk");
+    let output = std::process::Command::new(&deno)
+        .arg("--version")
+        .output()
+        .expect("run deno");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.starts_with("deno 2."), "got {text}");
+}
+
+#[test]
+#[ignore = "downloads from dl.deno.land"]
+fn a_zip_runtime_verifies_after_installation() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ndeno = \"2\"\n",
+    );
+    sandbox.kiln().arg("install").assert().success();
+
+    // The manifest is recorded from whatever the extractor produced, so this is
+    // what catches the zip path and the tree walk disagreeing about, say,
+    // whether the binary is executable.
+    sandbox
+        .kiln()
+        .args(["cache", "verify"])
+        .assert()
+        .success()
+        .stderr(contains("intact"));
+}
+
+#[test]
+#[ignore = "reads the dl.deno.land version index"]
+fn deno_records_a_zip_artifact_in_the_lockfile() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ndeno = \"2\"\n",
+    );
+    sandbox.kiln().arg("lock").assert().success();
+
+    let lockfile = sandbox.read("kiln.lock");
+    assert!(lockfile.contains("dl.deno.land/release/v2."), "{lockfile}");
+    assert!(lockfile.contains("format = \"zip\""), "{lockfile}");
+    assert!(lockfile.contains("digest = \"sha256:"));
+}
+
+#[test]
+#[ignore = "reads the dl.deno.land version index"]
+fn deno_locks_for_every_platform_it_supports() {
+    let sandbox = Sandbox::new();
+    sandbox.write(
+        "kiln.toml",
+        "[project]\nname = \"app\"\n\n[runtime]\ndeno = \"2\"\n",
+    );
+    sandbox
+        .kiln()
+        .args(["lock", "--all-platforms"])
+        .assert()
+        .success();
+
+    let lockfile = sandbox.read("kiln.lock");
+    for platform in ["macos-aarch64", "macos-x86_64", "linux-x86_64-gnu"] {
+        assert!(
+            lockfile.contains(&format!("[platform.{platform}.")),
+            "missing {platform}"
+        );
+    }
+    // Deno publishes no musl build, so those platforms must be skipped rather
+    // than locked to a glibc binary that cannot load there.
+    assert!(
+        !lockfile.contains("linux-x86_64-musl"),
+        "musl has no Deno build and must not be locked:\n{lockfile}"
+    );
+}

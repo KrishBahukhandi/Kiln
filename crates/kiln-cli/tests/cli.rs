@@ -1893,7 +1893,7 @@ fn an_unknown_runtime_lists_go_among_the_alternatives() {
         .arg("install")
         .assert()
         .code(exit::NOT_FOUND)
-        .stderr(contains("one of: go, node, python"));
+        .stderr(contains("one of: deno, go, node, python"));
 }
 
 #[test]

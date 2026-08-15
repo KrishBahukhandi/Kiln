@@ -29,6 +29,7 @@
 pub mod archive;
 pub mod store;
 pub mod tree;
+pub mod zip;
 
 pub use archive::extract;
 pub use store::{ContentStore, EntryMeta, StoreEntry, Verification, unix_now};

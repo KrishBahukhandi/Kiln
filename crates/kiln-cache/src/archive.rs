@@ -40,9 +40,9 @@ pub fn extract(
         return Err(
             Error::unsupported(format!("Kiln cannot unpack {format} archives"))
                 .because(format!(
-                    "This build reads tar.gz only; the artifact is packed as {format}."
+                    "This build reads tar.gz and zip; the artifact is packed as {format}."
                 ))
-                .hint("choose a version published as a gzip tarball, or open an issue"),
+                .hint("choose a version published as a gzip tarball or a zip, or open an issue"),
         );
     }
 
@@ -52,7 +52,11 @@ pub fn extract(
     }
     std::fs::create_dir_all(&raw).io_context("Could not create the staging directory", &raw)?;
 
-    unpack_tar_gz(archive, &raw)?;
+    match format {
+        ArtifactFormat::Zip => crate::zip::unpack(archive, &raw)?,
+        // `is_supported` has already refused everything else.
+        _ => unpack_tar_gz(archive, &raw)?,
+    }
     descend(&raw, strip_components, archive)
 }
 
@@ -110,7 +114,7 @@ fn unpack_tar_gz(archive: &Path, into: &Path) -> Result<()> {
 }
 
 /// Why a path is not acceptable inside an archive, if it is not.
-fn unsafe_path(path: &Path) -> Option<&'static str> {
+pub(crate) fn unsafe_path(path: &Path) -> Option<&'static str> {
     use std::path::Component;
 
     if path.is_absolute() {
@@ -132,7 +136,7 @@ fn unsafe_path(path: &Path) -> Option<&'static str> {
 ///
 /// Resolved lexically against the link's own directory: a link may point
 /// anywhere within the extracted tree, and nowhere outside it.
-fn unsafe_link(link_path: &Path, target: &Path) -> Option<&'static str> {
+pub(crate) fn unsafe_link(link_path: &Path, target: &Path) -> Option<&'static str> {
     use std::path::Component;
 
     if target.is_absolute() {
@@ -158,7 +162,7 @@ fn unsafe_link(link_path: &Path, target: &Path) -> Option<&'static str> {
     None
 }
 
-fn refused(archive: &Path, entry: &str, problem: &str) -> Error {
+pub(crate) fn refused(archive: &Path, entry: &str, problem: &str) -> Error {
     Error::new(
         kiln_core::ErrorKind::Verification,
         "The artifact contains an entry Kiln will not extract",
@@ -461,11 +465,11 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let archive = write_archive(workspace.path(), NODE_SHAPED);
 
-        for format in [ArtifactFormat::TarXz, ArtifactFormat::Zip] {
-            let error = extract(&archive, format, workspace.path(), 1).unwrap_err();
-            assert_eq!(error.kind(), kiln_core::ErrorKind::Unsupported);
-            assert!(error.summary().contains(format.extension()));
-        }
+        // xz is the one left. It stays recognisable in a lockfile without being
+        // unpackable, so a lockfile written by a future Kiln still parses here.
+        let error = extract(&archive, ArtifactFormat::TarXz, workspace.path(), 1).unwrap_err();
+        assert_eq!(error.kind(), kiln_core::ErrorKind::Unsupported);
+        assert!(error.summary().contains("tar.xz"));
     }
 
     #[test]

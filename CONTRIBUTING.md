@@ -81,18 +81,48 @@ This is the path the architecture is built around, and it should stay short.
 
 Note what you do *not* write: downloading, verifying and extracting are shared.
 A provider declares a `RuntimeLayout` and the installer does the rest, so there
-is exactly one piece of tar-handling code in Kiln to get right.
-
-Go was added this way and it took one file plus one registry line — but adding
-it did surface a bug elsewhere, which is worth knowing about. `go` is two
-characters, and the "did you mean?" suggestion used a fixed two-edit budget, so
-it started proposing `go` for `io`, `ai` and the empty string. Short names now
-match on shared prefix only. Adding a runtime with an unusually short or long
-name is worth a glance at `Registry::suggest`.
+is exactly one piece of archive-handling code in Kiln to get right.
 
 That is the whole change. Nothing in `kiln-config`, `kiln-resolver` or
 `kiln-cli` should need touching — if it does, the abstraction has a hole and the
 hole is the bug.
+
+### What the last two taught us
+
+**Go** took one file plus one registry line, and surfaced a bug elsewhere. `go`
+is two characters, and the "did you mean?" suggestion used a fixed two-edit
+budget, so it started proposing `go` for `io`, `ai` and the empty string. Short
+names now match on shared prefix only. A runtime with an unusually short or long
+name is worth a glance at `Registry::suggest`.
+
+**Deno** needed two things the abstraction did not have, which is the honest
+version of "adding a runtime is one file":
+
+- It ships zip and nothing else, so `kiln-cache` gained a zip reader.
+- It is a single binary at the archive root rather than a tree with a `bin/`,
+  so `RuntimeLayout` gained `FLAT` and `bin_paths`.
+
+Both are now shared, so the next runtime shaped like either gets them for free.
+The lesson is the one in the last paragraph: when a provider cannot be written
+without reaching outside its own file, the gap belongs in the shared layer, not
+in the provider.
+
+### Before you pick a runtime, check what it publishes
+
+Two candidates that look easy and are not:
+
+- **Bun** ships zip, which is now fine, but its only version index is the GitHub
+  releases API — sixty requests an hour unauthenticated, shared across everyone
+  behind one NAT. Deno avoids this entirely with `dl.deno.land/versions.json`.
+  Someone should work out what Kiln does when that budget runs out before
+  writing the provider, not after.
+- **Rust** publishes a combined `tar.gz`, so extraction is not the problem. The
+  problem is that it unpacks to per-component directories — `cargo/bin`,
+  `rustc/bin`, `rust-std-<triple>/` — and `rustc` finds its standard library
+  relative to its own path. Unpacked as-is it installs cleanly and then cannot
+  compile anything, which is the worst failure shape there is. It needs either
+  component merging or `install.sh`, and running a vendor's shell script is a
+  different trust model than Kiln has anywhere else. Decide that first.
 
 ## Tests
 

@@ -352,11 +352,7 @@ fn fetch(
 
 /// Where a stored entry keeps its executables.
 fn bin_dirs_of(entry: &StoreEntry, layout: RuntimeLayout) -> Vec<PathBuf> {
-    layout
-        .bin_dirs
-        .iter()
-        .map(|dir| entry.content_path().join(dir))
-        .collect()
+    layout.bin_paths(&entry.content_path())
 }
 
 /// A scratch directory under `~/.kiln/staging`, removed when it goes out of

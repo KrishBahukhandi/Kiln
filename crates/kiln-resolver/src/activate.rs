@@ -139,12 +139,9 @@ pub fn activate(
             let stored = entry.and_then(|locked| store.get(&locked.artifact.digest));
 
             let bin_dirs = match (&stored, provider) {
-                (Some(stored), Some(provider)) => provider
-                    .layout()
-                    .bin_dirs
-                    .iter()
-                    .map(|dir| stored.content_path().join(dir))
-                    .collect(),
+                (Some(stored), Some(provider)) => {
+                    provider.layout().bin_paths(&stored.content_path())
+                }
                 _ => Vec::new(),
             };
 

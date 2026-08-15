@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::provider::RuntimeProvider;
-use crate::providers::{GoProvider, NodeProvider, PythonProvider};
+use crate::providers::{DenoProvider, GoProvider, NodeProvider, PythonProvider};
 
 /// How different two names may be before Kiln stops offering a correction.
 ///
@@ -40,6 +40,7 @@ impl Registry {
                 Arc::new(NodeProvider),
                 Arc::new(PythonProvider),
                 Arc::new(GoProvider),
+                Arc::new(DenoProvider),
             ],
         }
     }

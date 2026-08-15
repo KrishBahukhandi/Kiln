@@ -700,7 +700,7 @@ function Commands() {
 
 const ROADMAP: [string, string, "done" | "next" | "planned"][] = [
   ["Manifest, validation, diagnostics", "kiln.toml and kiln init", "done"],
-  ["Runtime management", "Node.js, Python and Go", "done"],
+  ["Runtime management", "Node.js, Python, Go and Deno", "done"],
   ["Content-addressed cache", "install, share, collect", "done"],
   ["Environment activation", "kiln shell and kiln run", "done"],
   ["Deterministic locking", "cross-platform, --locked for CI", "done"],

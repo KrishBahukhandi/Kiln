@@ -140,6 +140,7 @@ and nothing pretends to succeed.
 | Node.js | [nodejs.org](https://nodejs.org/dist) | macOS and Linux, x86-64 and arm64 (glibc only — upstream publishes no musl builds) |
 | Python | [python-build-standalone](https://github.com/astral-sh/python-build-standalone) | macOS and Linux, x86-64 and arm64, glibc **and** musl |
 | Go | [go.dev](https://go.dev/dl) | macOS and Linux, x86-64 and arm64, glibc and musl (the toolchain is statically linked) |
+| Deno | [dl.deno.land](https://dl.deno.land) | macOS and Linux, x86-64 and arm64 (glibc only — upstream publishes no musl builds) |
 
 Adding one is a single file plus a line in the registry — see
 [CONTRIBUTING.md](CONTRIBUTING.md).
@@ -434,7 +435,7 @@ Eight crates, split by responsibility rather than by convenience:
 | `kiln-config` | The `kiln.toml` schema, parsing, validation, discovery, generation. |
 | `kiln-net` | The only crate allowed to make an HTTP request. |
 | `kiln-cache` | The content-addressed store, and archive extraction. |
-| `kiln-runtime` | `RuntimeProvider`, and everything specific to Node.js or Python. |
+| `kiln-runtime` | `RuntimeProvider`, and everything specific to a particular runtime. |
 | `kiln-resolver` | Manifest → exact environment → installed, and the lockfile. |
 | `kiln-exec` | Composing `PATH`, resolving programs, running them. |
 | `kiln-cli` | Argument parsing and command dispatch. |
@@ -453,7 +454,7 @@ question you can answer by reading the dependency graph.
 | 2 | Node.js and Python providers: resolve, download, verify, install | ✅ done |
 | 3 | Cache garbage collection | ✅ done |
 | 3 | Cache verification | ✅ done |
-| 8 | More runtimes | Go done; Rust, Bun, Deno next |
+| 8 | More runtimes | Go and Deno done; Bun and Rust next |
 | 4 | `kiln shell`, `kiln run` | ✅ done |
 | 5 | `kiln clean`, richer output | partial |
 | 6 | Cross-platform locking, `--locked` for CI, drift reporting | ✅ done |
