@@ -5,19 +5,26 @@
 //! stderr is not a terminal, or `--quiet` is set, the bars are replaced with
 //! plain one-line-per-event output — a progress bar written to a CI log is
 //! thousands of useless lines.
+//!
+//! Several runtimes download at once, so the bars are owned by a
+//! [`MultiProgress`], which serialises the drawing. Each worker holds its own
+//! bar and never touches another's; that is why [`Track`] is `Send` but not
+//! `Sync`, and why none of this needs a lock of its own.
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use kiln_cache::StoreEntry;
 use kiln_core::Ui;
 use kiln_core::ui::{Style, paint};
 use kiln_net::Progress;
-use kiln_resolver::{Observer, ResolvedRuntime};
+use kiln_resolver::{Observer, ResolvedRuntime, Track};
 
 /// Draws install progress for a person at a terminal.
 pub struct CliObserver {
     ui: Ui,
     /// Whether bars can be drawn at all.
     animated: bool,
+    /// Owns every live bar, so concurrent downloads do not overwrite each other.
+    bars: MultiProgress,
 }
 
 impl CliObserver {
@@ -27,6 +34,7 @@ impl CliObserver {
         CliObserver {
             ui: ui.clone(),
             animated,
+            bars: MultiProgress::new(),
         }
     }
 
@@ -45,26 +53,26 @@ impl Observer for CliObserver {
         ));
     }
 
-    fn downloading(&mut self, runtime: &ResolvedRuntime) -> Box<dyn Progress> {
+    fn track(&mut self, runtime: &ResolvedRuntime) -> Box<dyn Track> {
         let label = Self::label(runtime);
         if !self.animated {
             self.ui.status(format!("  ↓ {label}"));
-            return Box::new(LineProgress {
+            return Box::new(LineTrack {
+                progress: LineProgress {
+                    ui: self.ui.clone(),
+                    label: label.clone(),
+                },
                 ui: self.ui.clone(),
                 label,
             });
         }
 
-        let bar = ProgressBar::new_spinner();
-        bar.set_message(label);
-        Box::new(BarProgress { bar })
-    }
-
-    fn unpacking(&mut self, runtime: &ResolvedRuntime) {
-        if !self.animated {
-            self.ui
-                .status(format!("  ⇱ unpacking {}", Self::label(runtime)));
-        }
+        let bar = self.bars.add(ProgressBar::new_spinner());
+        bar.set_message(label.clone());
+        Box::new(BarTrack {
+            progress: BarProgress { bar },
+            label,
+        })
     }
 
     fn installed(&mut self, runtime: &ResolvedRuntime, entry: &StoreEntry) {
@@ -79,6 +87,56 @@ impl Observer for CliObserver {
             Self::label(runtime),
             paint(&detail, Style::Dim, self.ui.color())
         ));
+    }
+}
+
+/// One runtime's bar, from download through unpacking.
+struct BarTrack {
+    progress: BarProgress,
+    label: String,
+}
+
+impl Track for BarTrack {
+    fn progress(&mut self) -> &mut dyn Progress {
+        &mut self.progress
+    }
+
+    fn unpacking(&mut self) {
+        // The same bar, re-purposed. Unpacking has no byte count to report
+        // against, so it reverts to a spinner rather than showing a full bar
+        // that has stopped moving — which reads as a hang.
+        let style = ProgressStyle::with_template("  {spinner:.cyan} {msg}")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner());
+        self.progress.bar.set_style(style);
+        self.progress
+            .bar
+            .set_message(format!("{} — unpacking", self.label));
+    }
+}
+
+impl Drop for BarTrack {
+    fn drop(&mut self) {
+        // Cleared rather than left on screen: the `✓` line that follows says
+        // the same thing without the leftover bar. Done on drop so it happens
+        // on the failure path too, where no `✓` is coming.
+        self.progress.bar.finish_and_clear();
+    }
+}
+
+/// One runtime's narration, where a bar would be noise.
+struct LineTrack {
+    progress: LineProgress,
+    ui: Ui,
+    label: String,
+}
+
+impl Track for LineTrack {
+    fn progress(&mut self) -> &mut dyn Progress {
+        &mut self.progress
+    }
+
+    fn unpacking(&mut self) {
+        self.ui.status(format!("  ⇱ unpacking {}", self.label));
     }
 }
 
@@ -115,9 +173,8 @@ impl Progress for BarProgress {
     }
 
     fn finish(&mut self) {
-        // Cleared, not left on screen: the `✓` line that follows says the same
-        // thing without the leftover bar.
-        self.bar.finish_and_clear();
+        // Deliberately not cleared here: unpacking reuses this bar, and
+        // `BarTrack::drop` is what finally takes it down.
     }
 }
 

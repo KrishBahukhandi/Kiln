@@ -37,7 +37,8 @@ pub mod resolve;
 pub use activate::{ActiveRuntime, ProjectEnvironment, activate};
 pub use drift::{Drift, DriftReason, drift, is_up_to_date, locked_error};
 pub use install::{
-    InstallOutcome, InstalledRuntime, Observer, SilentObserver, clean_staging, install,
+    DEFAULT_JOBS, InstallOutcome, InstalledRuntime, MAX_JOBS, Observer, SilentObserver,
+    SilentTrack, Track, clean_staging, install,
 };
 pub use kiln_core::ArtifactFormat;
 pub use lockfile::{

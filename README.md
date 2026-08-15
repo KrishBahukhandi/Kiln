@@ -118,7 +118,7 @@ and runs `kiln install` gets byte-identical runtimes.
 | | Command | |
 | --- | --- | --- |
 | ✅ | `kiln init` | Detects the project and writes `kiln.toml`. |
-| ✅ | `kiln install` | Resolves, downloads, verifies, installs, writes `kiln.lock`. `--locked` for CI. |
+| ✅ | `kiln install` | Resolves, downloads, verifies, installs, writes `kiln.lock`. `--locked` for CI, `--jobs N` to fetch several at once. |
 | ✅ | `kiln lock` | Writes `kiln.lock` without installing. `--all-platforms`, `--check`. |
 | ✅ | `kiln list` | What the project pins and whether it is installed. `--json`. |
 | ✅ | `kiln doctor` | Diagnoses the project and this machine. `--json`. |
@@ -457,7 +457,7 @@ question you can answer by reading the dependency graph.
 | 4 | `kiln shell`, `kiln run` | ✅ done |
 | 5 | `kiln clean`, richer output | partial |
 | 6 | Cross-platform locking, `--locked` for CI, drift reporting | ✅ done |
-| 7 | Parallel downloads, concurrency, mirrors, signatures | partial |
+| 7 | Concurrent downloads (`--jobs`), mirrors, signatures | concurrency done, off by default; mirrors and signatures next |
 | 8 | Services, OCI, Windows, IDE integration | |
 
 Explicitly **not** planned for 1.0: user accounts, a cloud dashboard, telemetry,

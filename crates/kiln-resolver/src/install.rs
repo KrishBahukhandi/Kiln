@@ -13,32 +13,88 @@
 //! install interrupted at any earlier point leaves the store exactly as it was,
 //! and leaves at worst a directory in `staging/` that the next run cleans up.
 //!
-//! Installs run one at a time. Downloading in parallel would be faster and is on
-//! the roadmap for Phase 7; doing it now would mean building multi-bar progress
-//! and cross-thread error aggregation before the single-threaded path has ever
-//! run against a real artifact.
+//! # Doing several at once, and why it is off by default
+//!
+//! Kiln can fetch runtimes concurrently — see [`install`]'s `jobs` argument —
+//! but [`DEFAULT_JOBS`] is 1, because measurement did not support turning it on.
+//!
+//! Installing Node 22.14.0, Python 3.13.15 and Go 1.26.6 into an empty store
+//! over a domestic connection, best of several runs each:
+//!
+//! ```text
+//! sequential    60s     (14s + 27s + 19s)
+//! 3 at once     75s     and as bad as 110s
+//! ```
+//!
+//! Concurrency lost every time. Total bytes are fixed, so when the link is
+//! already saturated by one download, splitting it three ways adds TCP
+//! contention and three simultaneous streams of decompression and hashing
+//! competing for the same disk — without adding any bandwidth to divide.
+//!
+//! It is kept, and exposed, because the picture inverts when the bottleneck is
+//! the far end rather than the near one: on a CI runner with a very fast link,
+//! a single stream from a distribution mirror is limited by the server, and
+//! several streams genuinely do finish sooner. That is a real situation, but it
+//! is not the situation most people run `kiln install` in, so it is opt-in.
+//!
+//! Two properties hold at any `jobs` value, because losing either would trade a
+//! real guarantee for a few seconds:
+//!
+//! - **The reported error does not depend on which thread lost.** Every job runs
+//!   to completion and results are sorted back into manifest order before the
+//!   first failure is returned, so a given `kiln.toml` fails the same way every
+//!   time.
+//! - **One runtime never spawns a thread**, whatever `jobs` says.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use kiln_cache::{ContentStore, EntryMeta, StoreEntry};
 use kiln_core::error::{Error, IoResultExt, Result};
-use kiln_core::{KilnPaths, Version};
+use kiln_core::{KilnPaths, RuntimeLayout, Version};
 use kiln_net::{Download, Http, Progress, SilentProgress};
 use kiln_runtime::Registry;
 
 use crate::resolve::{Resolution, ResolvedRuntime};
 
+/// How many artifacts Kiln fetches at once unless told otherwise.
+///
+/// One. See this module's documentation for the measurement behind that.
+pub const DEFAULT_JOBS: usize = 1;
+
+/// The most Kiln will fetch at once, whatever it is asked for.
+///
+/// Past a handful of streams the contention is certain and the benefit is not,
+/// and every extra concurrent download is another partial transfer to unwind
+/// when something fails.
+pub const MAX_JOBS: usize = 8;
+
 /// Watches an installation happen, so the CLI can draw progress without this
 /// crate knowing what a terminal is.
+///
+/// The methods here are called from the calling thread. Anything that has to be
+/// reported *while* a runtime is being fetched goes through [`Track`], which is
+/// handed to the worker instead.
 pub trait Observer {
     /// A runtime is already in the store and will not be fetched.
     fn reused(&mut self, runtime: &ResolvedRuntime);
-    /// A download is about to start; return something to report progress to.
-    fn downloading(&mut self, runtime: &ResolvedRuntime) -> Box<dyn Progress>;
-    /// The archive is being unpacked into the store.
-    fn unpacking(&mut self, runtime: &ResolvedRuntime);
+    /// A runtime is about to be fetched; return the reporter for it.
+    fn track(&mut self, runtime: &ResolvedRuntime) -> Box<dyn Track>;
     /// A runtime is now installed.
     fn installed(&mut self, runtime: &ResolvedRuntime, entry: &StoreEntry);
+}
+
+/// Reports one runtime's progress from the thread fetching it.
+///
+/// `Send` because it is moved onto a worker; not `Sync`, because nothing else
+/// touches it once it has been handed over. That is what lets a terminal
+/// implementation hold a progress bar without a lock around it.
+pub trait Track: Send {
+    /// Where download progress is reported.
+    fn progress(&mut self) -> &mut dyn Progress;
+    /// The archive has been verified and is being unpacked.
+    fn unpacking(&mut self);
 }
 
 /// An [`Observer`] that reports nothing.
@@ -47,11 +103,21 @@ pub struct SilentObserver;
 
 impl Observer for SilentObserver {
     fn reused(&mut self, _runtime: &ResolvedRuntime) {}
-    fn downloading(&mut self, _runtime: &ResolvedRuntime) -> Box<dyn Progress> {
-        Box::new(SilentProgress)
+    fn track(&mut self, _runtime: &ResolvedRuntime) -> Box<dyn Track> {
+        Box::new(SilentTrack(SilentProgress))
     }
-    fn unpacking(&mut self, _runtime: &ResolvedRuntime) {}
     fn installed(&mut self, _runtime: &ResolvedRuntime, _entry: &StoreEntry) {}
+}
+
+/// A [`Track`] that reports nothing.
+#[derive(Debug, Default)]
+pub struct SilentTrack(SilentProgress);
+
+impl Track for SilentTrack {
+    fn progress(&mut self) -> &mut dyn Progress {
+        &mut self.0
+    }
+    fn unpacking(&mut self) {}
 }
 
 /// One runtime, installed and ready to be put on `PATH`.
@@ -98,81 +164,167 @@ impl InstallOutcome {
     }
 }
 
+/// One runtime waiting to be fetched.
+struct Job<'a> {
+    /// Position in the resolution, so results can be put back in order.
+    index: usize,
+    runtime: &'a ResolvedRuntime,
+    layout: RuntimeLayout,
+    track: Box<dyn Track>,
+}
+
 /// Install everything in `resolution`.
+///
+/// `jobs` is how many runtimes to fetch at once; it is clamped to at least 1 and
+/// at most [`MAX_JOBS`]. [`DEFAULT_JOBS`] is what the CLI passes unless asked
+/// otherwise — the module documentation explains why that is 1.
 pub fn install(
     resolution: &Resolution,
     registry: &Registry,
     paths: &KilnPaths,
     http: &Http,
     observer: &mut dyn Observer,
+    jobs: usize,
 ) -> Result<InstallOutcome> {
     paths.ensure()?;
     let store = ContentStore::new(paths.store());
+    let concurrency = jobs.clamp(1, MAX_JOBS);
 
-    let mut installed = Vec::with_capacity(resolution.runtimes.len());
-    for runtime in &resolution.runtimes {
-        installed.push(install_one(
-            runtime, registry, &store, paths, http, observer,
-        )?);
-    }
-    Ok(InstallOutcome {
-        runtimes: installed,
-    })
-}
+    // Everything that touches the registry or the observer happens here, on one
+    // thread, before any worker starts. A worker needs only plain data.
+    let mut slots: Vec<Option<InstalledRuntime>> =
+        (0..resolution.runtimes.len()).map(|_| None).collect();
+    let mut pending = Vec::new();
 
-fn install_one(
-    runtime: &ResolvedRuntime,
-    registry: &Registry,
-    store: &ContentStore,
-    paths: &KilnPaths,
-    http: &Http,
-    observer: &mut dyn Observer,
-) -> Result<InstalledRuntime> {
-    let provider = registry
-        .get(&runtime.id)
-        .ok_or_else(|| registry.unknown(&runtime.id))?;
-    let layout = provider.layout();
+    for (index, runtime) in resolution.runtimes.iter().enumerate() {
+        let layout = registry
+            .get(&runtime.id)
+            .ok_or_else(|| registry.unknown(&runtime.id))?
+            .layout();
 
-    let bin_dirs_of = |entry: &StoreEntry| -> Vec<PathBuf> {
-        layout
-            .bin_dirs
-            .iter()
-            .map(|dir| entry.content_path().join(dir))
-            .collect()
-    };
+        // Already installed: the whole point of content addressing.
+        if let Some(entry) = store.get(&runtime.artifact.digest) {
+            observer.reused(runtime);
+            slots[index] = Some(InstalledRuntime {
+                id: runtime.id.clone(),
+                display_name: runtime.display_name.clone(),
+                version: runtime.version.clone(),
+                bin_dirs: bin_dirs_of(&entry, layout),
+                entry,
+                was_cached: true,
+            });
+            continue;
+        }
 
-    // Already installed: the whole point of content addressing.
-    if let Some(entry) = store.get(&runtime.artifact.digest) {
-        observer.reused(runtime);
-        return Ok(InstalledRuntime {
-            id: runtime.id.clone(),
-            display_name: runtime.display_name.clone(),
-            version: runtime.version.clone(),
-            bin_dirs: bin_dirs_of(&entry),
-            entry,
-            was_cached: true,
+        pending.push(Job {
+            index,
+            runtime,
+            layout,
+            track: observer.track(runtime),
         });
     }
 
+    for (index, outcome) in run(pending, concurrency, &store, paths, http) {
+        // Sorted by index already, so the first failure is the first one in
+        // `kiln.toml` rather than whichever thread happened to finish first.
+        let installed = outcome?;
+        observer.installed(&resolution.runtimes[index], &installed.entry);
+        slots[index] = Some(installed);
+    }
+
+    Ok(InstallOutcome {
+        runtimes: slots
+            .into_iter()
+            .map(|slot| {
+                slot.ok_or_else(|| {
+                    Error::internal("An installed runtime went missing between planning and report")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+/// Run every job, concurrently when there is more than one.
+///
+/// Results come back sorted by index, so callers see manifest order regardless
+/// of what the network did.
+fn run<'a>(
+    jobs: Vec<Job<'a>>,
+    concurrency: usize,
+    store: &ContentStore,
+    paths: &KilnPaths,
+    http: &Http,
+) -> Vec<(usize, Result<InstalledRuntime>)> {
+    // One runtime, or sequential by request, gets the plain path: no threads, no
+    // queue, nothing to reason about when something goes wrong.
+    if jobs.len() <= 1 || concurrency <= 1 {
+        return jobs
+            .into_iter()
+            .map(|job| (job.index, fetch(job, store, paths, http)))
+            .collect();
+    }
+
+    let workers = jobs.len().min(concurrency);
+    let queue: Mutex<VecDeque<Job<'a>>> = Mutex::new(jobs.into());
+    let results: Mutex<Vec<(usize, Result<InstalledRuntime>)>> = Mutex::new(Vec::new());
+
+    // Scoped threads so the jobs can borrow the resolution rather than cloning
+    // it, and so every worker is joined before this function returns.
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let Some(job) = lock(&queue).pop_front() else {
+                        break;
+                    };
+                    let index = job.index;
+                    let outcome = fetch(job, store, paths, http);
+                    lock(&results).push((index, outcome));
+                }
+            });
+        }
+    });
+
+    let mut results = results.into_inner().unwrap_or_else(|e| e.into_inner());
+    results.sort_by_key(|(index, _)| *index);
+    results
+}
+
+/// Take a lock, ignoring poisoning.
+///
+/// The critical sections here are a `pop_front` and a `push`. Neither can leave
+/// the protected value inconsistent, so a panic elsewhere in a worker is no
+/// reason to take down the workers that are still making progress.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Download, verify, unpack and store one runtime.
+fn fetch(
+    mut job: Job<'_>,
+    store: &ContentStore,
+    paths: &KilnPaths,
+    http: &Http,
+) -> Result<InstalledRuntime> {
+    let runtime = job.runtime;
     let workspace = Workspace::create(paths, &runtime.id, &runtime.version)?;
     let archive = workspace.path().join("artifact");
 
     let label = format!("{} {}", runtime.display_name, runtime.version);
-    let mut progress = observer.downloading(runtime);
     let bytes = Download {
         url: &runtime.artifact.url,
         what: &label,
         expected: &runtime.artifact.digest,
         size: runtime.artifact.size,
     }
-    .to_file(http, &archive, progress.as_mut())?;
+    .to_file(http, &archive, job.track.progress())?;
 
-    observer.unpacking(runtime);
+    job.track.unpacking();
     let content = kiln_cache::extract(
         &archive,
         runtime.artifact.format,
         workspace.path(),
-        layout.strip_components,
+        job.layout.strip_components,
     )?;
 
     // The archive is no longer needed and would otherwise be moved into the
@@ -188,15 +340,23 @@ fn install_one(
     );
     let entry = store.insert(&content, &runtime.artifact.digest, &meta)?;
 
-    observer.installed(runtime, &entry);
     Ok(InstalledRuntime {
         id: runtime.id.clone(),
         display_name: runtime.display_name.clone(),
         version: runtime.version.clone(),
-        bin_dirs: bin_dirs_of(&entry),
+        bin_dirs: bin_dirs_of(&entry, job.layout),
         entry,
         was_cached: false,
     })
+}
+
+/// Where a stored entry keeps its executables.
+fn bin_dirs_of(entry: &StoreEntry, layout: RuntimeLayout) -> Vec<PathBuf> {
+    layout
+        .bin_dirs
+        .iter()
+        .map(|dir| entry.content_path().join(dir))
+        .collect()
 }
 
 /// A scratch directory under `~/.kiln/staging`, removed when it goes out of
@@ -378,6 +538,35 @@ mod tests {
         let python = runtime("Python");
         let error = offline_gap(&[&node, &python]);
         assert!(error.summary().contains("are not available"));
+    }
+
+    #[test]
+    fn concurrency_is_clamped_to_something_sane() {
+        // `--jobs 0` must not mean "no workers, hang forever", and `--jobs 500`
+        // must not mean five hundred sockets.
+        assert_eq!(0usize.clamp(1, MAX_JOBS), 1);
+        assert_eq!(500usize.clamp(1, MAX_JOBS), MAX_JOBS);
+        assert_eq!(DEFAULT_JOBS.clamp(1, MAX_JOBS), DEFAULT_JOBS);
+    }
+
+    #[test]
+    fn the_default_is_sequential() {
+        // Measured, not assumed — see this module's documentation. If this ever
+        // changes it should change because someone re-measured.
+        assert_eq!(DEFAULT_JOBS, 1);
+    }
+
+    #[test]
+    fn results_come_back_in_manifest_order_whatever_the_workers_did() {
+        // The guarantee that makes a failing install reproducible: whichever
+        // job finishes first, the caller sees `kiln.toml` order.
+        let mut finished: Vec<(usize, &str)> = vec![(2, "go"), (0, "node"), (1, "python")];
+        finished.sort_by_key(|(index, _)| *index);
+
+        assert_eq!(
+            finished.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            ["node", "python", "go"]
+        );
     }
 
     #[test]

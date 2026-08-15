@@ -50,7 +50,14 @@ pub fn run(args: &InstallArgs, directory: &Path, offline: bool, ui: &Ui) -> Resu
     ui.blank();
     ui.section("Installing");
     let mut observer = CliObserver::new(ui);
-    let outcome = kiln_resolver::install(&resolution, &registry, &paths, &http, &mut observer)?;
+    let outcome = kiln_resolver::install(
+        &resolution,
+        &registry,
+        &paths,
+        &http,
+        &mut observer,
+        args.jobs,
+    )?;
 
     // Installing counts as using: a runtime reinstalled today should not be
     // evicted tomorrow for having been downloaded a year ago.

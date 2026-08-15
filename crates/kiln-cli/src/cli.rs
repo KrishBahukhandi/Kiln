@@ -141,6 +141,14 @@ pub struct InstallArgs {
     /// Fail rather than change kiln.lock. Use this in CI.
     #[arg(long)]
     pub locked: bool,
+
+    /// Fetch this many runtimes at once.
+    ///
+    /// Defaults to 1. Concurrency helps only when the far end is the
+    /// bottleneck; on an ordinary connection it measured consistently slower,
+    /// because the bytes are the same and the streams contend.
+    #[arg(long, value_name = "N", default_value_t = kiln_resolver::DEFAULT_JOBS)]
+    pub jobs: usize,
 }
 
 #[derive(Debug, clap::Args)]
