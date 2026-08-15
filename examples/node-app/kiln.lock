@@ -4,7 +4,7 @@ version = 1
 generated_by = "kiln 0.1.0"
 
 [project]
-name = "kiln-website"
+name = "node-app"
 
 [platform.linux-aarch64-gnu.runtime.node]
 provider = "node"

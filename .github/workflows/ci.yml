@@ -1,0 +1,125 @@
+# The gate every change has to pass.
+#
+# Everything here runs offline. `cargo test` is expected to work on a plane, and
+# a CI job that quietly depends on nodejs.org being up is a job that will fail
+# for reasons no contributor can fix. The tests that genuinely need the network
+# are `#[ignore]`d and live in `upstream.yml`, on a schedule.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  # So a red main can be re-run without an empty commit.
+  workflow_dispatch:
+
+# A new push to the same branch makes the previous run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Backtraces cost nothing here and turn "assertion failed" into something
+  # actionable without a second run.
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing is information about that platform, so let the
+      # other finish rather than cancelling it.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - run: cargo test --workspace --all-targets
+
+      # `--all-targets` skips doctests, and Kiln's documentation carries enough
+      # worked examples that they are worth compiling.
+      - run: cargo test --workspace --doc
+
+  lint:
+    name: fmt, clippy and docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update \
+            --component rustfmt --component clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all --check
+
+      # Warnings get fixed, not allowed — the same bar CONTRIBUTING.md sets.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: builds on the minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Kiln declares 1.88 for let-chains. A declared MSRV nothing checks drifts
+      # upward silently the first time someone uses a newer feature.
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88 --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - run: cargo +1.88 check --workspace --all-targets
+
+  lockfiles:
+    name: example lockfiles are current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release --bin kiln
+
+      # `kiln lock --check` is offline and structural: it compares kiln.toml
+      # against kiln.lock without resolving anything. This is the gate the
+      # `--locked` flag was built for, run against Kiln's own examples so a
+      # change to the lockfile format cannot ship without updating them.
+      - name: Check every example and the website
+        run: |
+          # Not `status`: that name is read-only in zsh, and a snippet a
+          # contributor cannot paste into their own shell is a snippet that
+          # gets debugged twice.
+          failed=0
+          for project in examples/*/ website/; do
+            if [ -f "$project/kiln.lock" ]; then
+              echo "::group::$project"
+              ./target/release/kiln -C "$project" lock --check || failed=1
+              echo "::endgroup::"
+            else
+              echo "$project has no kiln.lock — skipped"
+            fi
+          done
+          exit $failed

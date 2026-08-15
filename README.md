@@ -1,5 +1,8 @@
 # Kiln
 
+[![CI](https://github.com/KrishBahukhandi/Kiln/actions/workflows/ci.yml/badge.svg)](https://github.com/KrishBahukhandi/Kiln/actions/workflows/ci.yml)
+[![Upstream](https://github.com/KrishBahukhandi/Kiln/actions/workflows/upstream.yml/badge.svg)](https://github.com/KrishBahukhandi/Kiln/actions/workflows/upstream.yml)
+
 **Your development environment, committed.**
 
 Define the runtimes, tools and configuration a project needs in one file. Clone

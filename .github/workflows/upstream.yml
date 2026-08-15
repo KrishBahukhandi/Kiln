@@ -1,0 +1,97 @@
+# The canary for upstream drift.
+#
+# Kiln's providers parse release indexes published by other people — nodejs.org,
+# python-build-standalone, go.dev — and those formats change without warning.
+# Nothing in the offline suite can catch it: a hand-written fixture keeps passing
+# long after the real feed has moved on. Only a real download does.
+#
+# So these run on a schedule rather than per-commit. A failure here usually means
+# an upstream changed, not that a commit broke something, and finding that out on
+# a Tuesday morning is far better than finding it out from a bug report.
+
+name: Upstream
+
+on:
+  schedule:
+    # 05:00 UTC daily. Early enough that a break is known before the working day
+    # in most timezones, and off the hour to avoid GitHub's busiest minute.
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+  # Also on any change to the code that talks to those feeds, because that is
+  # the other way this breaks.
+  pull_request:
+    paths:
+      - "crates/kiln-runtime/**"
+      - "crates/kiln-net/**"
+      - "crates/kiln-cache/src/archive.rs"
+
+concurrency:
+  group: upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  network:
+    name: real downloads (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    # Downloading three runtimes twice over is not fast, and a stalled mirror
+    # should fail rather than occupy a runner for six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: upstream-${{ matrix.os }}
+
+      # Single-threaded on purpose: these tests share one store, and the point
+      # is to exercise the real download path, not to race it.
+      - name: Download, verify, extract and execute every runtime
+        run: cargo test -p kiln-cli --test network -- --ignored --test-threads=1
+
+  dogfood:
+    name: Kiln builds its own website
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dogfood
+
+      - run: cargo build --release --bin kiln
+
+      # No `actions/setup-node`, deliberately. The site pins its Node in
+      # website/kiln.toml, and the whole claim being tested is that cloning a
+      # repository and running Kiln is enough. Adding setup-node here would make
+      # this job pass even if that claim stopped being true.
+      - name: Install the site's environment with Kiln
+        working-directory: website
+        run: ../target/release/kiln install
+
+      - name: Build the site with Kiln
+        working-directory: website
+        run: ../target/release/kiln run build
+
+      - name: Check the store is intact afterwards
+        run: ./target/release/kiln cache verify
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: website
+          path: website/dist
+          retention-days: 7

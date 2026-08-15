@@ -10,7 +10,11 @@ description = "A JavaScript front end, a Python API, and their datastores."
 
 [runtime]
 node = "22.14.0"
-python = "3.13.5"
+# The release line, not an exact patch. python-build-standalone publishes only
+# the newest patch of each line, so `3.13.5` stops resolving the day 3.13.6
+# ships. The exact version is pinned in kiln.lock either way, which is where
+# reproducibility actually comes from.
+python = "3.13"
 
 [environment]
 NODE_ENV = "development"
