@@ -172,12 +172,16 @@ mod tests {
     use kiln_core::Platform;
 
     #[test]
-    fn the_builtin_registry_has_node_and_python() {
+    fn the_builtin_registry_lists_every_runtime_in_sorted_order() {
         let registry = Registry::builtin();
-        assert_eq!(registry.ids(), ["go", "node", "python"]);
-        assert!(registry.contains("node"));
-        assert!(registry.contains("python"));
-        assert!(registry.contains("go"));
+
+        // Sorted, not registration order: `ids()` reaches error messages and
+        // `--json`, and a list that reordered when a provider was added would
+        // make every one of those outputs churn.
+        assert_eq!(registry.ids(), ["deno", "go", "node", "python"]);
+        for id in ["node", "python", "go", "deno"] {
+            assert!(registry.contains(id), "{id} should be registered");
+        }
         assert!(!registry.contains("ruby"));
     }
 
