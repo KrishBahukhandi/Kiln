@@ -452,14 +452,16 @@ question you can answer by reading the dependency graph.
 | 0 | Workspace, errors, config model, CLI skeleton | ✅ done |
 | 1 | `kiln init`, validation, project discovery | ✅ done |
 | 2 | Node.js and Python providers: resolve, download, verify, install | ✅ done |
-| 3 | Cache garbage collection | ✅ done |
-| 3 | Cache verification | ✅ done |
-| 8 | More runtimes | Go and Deno done; Bun and Rust next |
+| 3 | Cache garbage collection and verification | ✅ done |
 | 4 | `kiln shell`, `kiln run` | ✅ done |
-| 5 | `kiln clean`, richer output | partial |
+| 5 | `kiln clean`, `--json` everywhere, richer output | ✅ done |
 | 6 | Cross-platform locking, `--locked` for CI, drift reporting | ✅ done |
-| 7 | Concurrent downloads (`--jobs`), mirrors, signatures | concurrency done, off by default; mirrors and signatures next |
-| 8 | Services, OCI, Windows, IDE integration | |
+| 7 | Concurrent downloads | ✅ done — measured slower on an ordinary link, so `--jobs` is opt-in |
+| 7 | Mirrors and publisher signatures | not started; see [SECURITY.md](SECURITY.md) |
+| 8 | More runtimes | Node.js, Python, Go and Deno done |
+| 8 | Bun | blocked: its only version index is the GitHub API, which is rate-limited |
+| 8 | Rust | blocked: unpacks to per-component `bin` dirs, and `rustc` finds its sysroot by its own path |
+| 8 | Services (`[services]` is parsed, nothing is managed), Windows, IDE integration | not started |
 
 Explicitly **not** planned for 1.0: user accounts, a cloud dashboard, telemetry,
 remote execution, or replacing containers.
