@@ -22,12 +22,15 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Applies to release indexes and checksum files only. Downloads are pointedly
 /// *not* capped this way: a slow connection should be slow, not fail.
 const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
-/// How long a download may go without receiving any data before Kiln gives up.
-const STALLED_BODY_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest release index Kiln will read into memory.
 const MAX_METADATA_BYTES: u64 = 32 * 1024 * 1024;
 
 /// A blocking HTTP client.
+///
+/// `Clone` because a download runs on its own thread and must own everything it
+/// touches — see [`crate::download`]. The agents are internally reference
+/// counted, so a clone shares the connection pool rather than rebuilding it.
+#[derive(Clone)]
 pub struct Http {
     /// For release indexes and checksum files, which are small and bounded.
     agent: ureq::Agent,
@@ -70,14 +73,20 @@ impl Http {
             // hop, so a header deadline sized for a small JSON fetch starts
             // failing real downloads intermittently.
             //
-            // What is left still catches every failure worth catching: a host
-            // that will not resolve, a connection that will not open, and a
-            // stream that has stopped delivering bytes.
+            // There is deliberately no body timeout here either. `ureq`'s
+            // `timeout_recv_body` is a deadline for the *whole* body, not the
+            // per-stall timeout its name suggests, so any value tight enough to
+            // catch a dead connection also kills a healthy large download — and
+            // it was observed not to apply over TLS at all. Kiln enforces the
+            // stall itself, where the semantics are its own; see
+            // [`crate::download`].
+            //
+            // What is left catches what this layer can honestly catch: a host
+            // that will not resolve, and a connection that will not open.
             download_agent: ureq::Agent::config_builder()
                 .user_agent(user_agent())
                 .timeout_resolve(Some(CONNECT_TIMEOUT))
                 .timeout_connect(Some(CONNECT_TIMEOUT))
-                .timeout_recv_body(Some(STALLED_BODY_TIMEOUT))
                 .http_status_as_error(false)
                 .build()
                 .new_agent(),

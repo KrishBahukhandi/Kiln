@@ -7,9 +7,39 @@
 //!
 //! The digest — not the URL — is what makes an artifact acceptable. A mirror is
 //! fine. A different payload from the official host is not.
+//!
+//! # Why the transfer runs on its own thread
+//!
+//! Kiln enforces its own stall timeout rather than relying on the HTTP client's,
+//! because the client's does not do what is needed here.
+//!
+//! `ureq` offers `timeout_recv_body`, which sounds right and is not: it is a
+//! deadline for receiving the *whole* body, so any value tight enough to catch a
+//! dead connection also kills a healthy download of a large runtime on a slow
+//! link. Worse, it was observed not to apply at all over TLS — `TransportAdapter`
+//! starts life with a `NotHappening` timeout, and the socket read timeout is only
+//! set when a finite one is computed, so a stalled HTTPS connection blocks in
+//! `recvfrom` indefinitely. A real `kiln install` sat for twenty minutes at
+//! 3.8 KB/s against a 120-second limit, with a progress bar that never moved.
+//!
+//! What is actually wanted is "no bytes at all for a while", which is the one
+//! shape that distinguishes a dead transfer from a slow one. A blocking read
+//! cannot be timed out from the thread performing it, so the transfer runs on a
+//! worker and the calling thread watches a byte counter. Slow-but-alive is
+//! allowed to take as long as it likes, exactly as documented.
+//!
+//! A stalled worker is abandoned rather than joined — it is stuck in a kernel
+//! read that nothing here can interrupt. That is bounded (at most
+//! three per download, all of which end when the process does), and
+//! each attempt writes to its own uniquely named part file, so an abandoned
+//! worker waking up later cannot scribble on a retry's download.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 use kiln_core::Digest;
 use kiln_core::error::{Error, ErrorKind, IoResultExt, Result};
@@ -36,7 +66,29 @@ const CHUNK_BYTES: usize = 64 * 1024;
 const MAX_ATTEMPTS: u32 = 3;
 
 /// How long to wait after the first failure. Doubles each time.
-const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
+const RETRY_BACKOFF: Duration = Duration::from_secs(1);
+
+/// How long a transfer may go without a single byte arriving.
+///
+/// Generous on purpose. This is not a throughput floor — a download creeping
+/// along at a few kilobytes a second is slow, not broken, and Kiln lets it
+/// finish. It only has to be short enough that a connection which has genuinely
+/// died is reported while someone is still watching.
+#[cfg(not(test))]
+const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The same, shortened so the stall tests take seconds rather than minutes.
+///
+/// What the tests pin down is that a stall is *detected and reported*; sixty
+/// seconds is a tuning choice, not the behaviour.
+#[cfg(test)]
+const STALL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// How often the calling thread looks at the byte counter.
+///
+/// Also the tick rate for the progress bar, so it stays smooth without the
+/// worker having to touch the terminal.
+const STALL_POLL: Duration = Duration::from_millis(250);
 
 /// Reports download progress to whatever is watching.
 ///
@@ -89,7 +141,7 @@ impl Download<'_> {
         let mut backoff = RETRY_BACKOFF;
 
         for attempt in 1..=MAX_ATTEMPTS {
-            match self.fetch(http, destination, progress) {
+            match self.fetch(http, destination, progress, attempt) {
                 Ok(written) => return Ok(written),
                 Err(error) => {
                     // Nothing partial survives a failed attempt, so a retry
@@ -122,7 +174,14 @@ impl Download<'_> {
         ))
     }
 
-    fn fetch(&self, http: &Http, destination: &Path, progress: &mut dyn Progress) -> Result<u64> {
+    /// Run one attempt on a worker, watching it for a stall from here.
+    fn fetch(
+        &self,
+        http: &Http,
+        destination: &Path,
+        progress: &mut dyn Progress,
+        attempt: u32,
+    ) -> Result<u64> {
         http.check_online(self.what)?;
 
         if let Some(parent) = destination.parent() {
@@ -130,77 +189,205 @@ impl Download<'_> {
                 .io_context("Could not create the download directory", parent)?;
         }
 
-        let mut response = http
-            .download_agent()
-            .get(self.url)
-            .call()
-            .map_err(|e| transport_error(e, self.url, self.what))?;
+        // Its own file per attempt, so a worker abandoned for stalling cannot
+        // write into the file a later attempt is building.
+        let part = part_path(destination, attempt);
+        let counter = Arc::new(AtomicU64::new(0));
+        let (events, incoming) = mpsc::channel();
 
-        check_status(response.status().as_u16(), self.url, self.what)?;
-
-        let declared = response.body().content_length().or(self.size);
-        if let Some(declared) = declared
-            && declared > MAX_ARTIFACT_BYTES
         {
-            return Err(oversize(self.what, self.url, declared));
+            // Everything the worker touches is owned by it: the calling thread
+            // may walk away at any moment.
+            let http = http.clone();
+            let url = self.url.to_string();
+            let what = self.what.to_string();
+            let expected = self.expected.clone();
+            let declared_size = self.size;
+            let (part, destination) = (part.clone(), destination.to_path_buf());
+            let counter = Arc::clone(&counter);
+
+            std::thread::Builder::new()
+                .name("kiln-download".into())
+                .spawn(move || {
+                    let outcome = transfer(
+                        &http,
+                        &url,
+                        &what,
+                        &expected,
+                        declared_size,
+                        &part,
+                        &destination,
+                        &counter,
+                        &events,
+                    );
+                    // The receiver is gone if this attempt was abandoned, which
+                    // is not an error — it is the whole point.
+                    let _ = events.send(Event::Done(outcome));
+                })
+                .map_err(|e| Error::internal("Could not start the download").with_source(e))?;
         }
-        progress.start(declared);
 
-        let mut reader = response.body_mut().as_reader();
-        let mut file = std::fs::File::create(destination)
-            .io_context("Could not create the download file", destination)?;
-
-        let mut hasher = Digest::hasher(self.expected.algorithm());
-        let mut buffer = vec![0u8; CHUNK_BYTES];
-        let mut written: u64 = 0;
+        let mut reported = 0u64;
+        let mut last_seen = 0u64;
+        let mut last_change = Instant::now();
 
         loop {
-            let read = match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(e) => {
+            match incoming.recv_timeout(STALL_POLL) {
+                Ok(Event::Started(declared)) => progress.start(declared),
+                Ok(Event::Done(outcome)) => {
+                    // A last advance so the bar reaches the end it reported.
+                    let seen = counter.load(Ordering::Relaxed);
+                    progress.advance(seen.saturating_sub(reported));
+                    progress.finish();
+                    return outcome;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    let seen = counter.load(Ordering::Relaxed);
+                    if seen != last_seen {
+                        last_seen = seen;
+                        last_change = Instant::now();
+                    } else if last_change.elapsed() >= STALL_TIMEOUT {
+                        progress.finish();
+                        return Err(stalled(self.what, self.url, seen));
+                    }
+                    progress.advance(seen.saturating_sub(reported));
+                    reported = seen;
+                }
+                // The worker died without reporting, which it is written not to
+                // do. Treated as a transport failure so the retry still applies.
+                Err(RecvTimeoutError::Disconnected) => {
                     progress.finish();
                     return Err(Error::new(
                         ErrorKind::Network,
-                        format!("The download of {} was interrupted", self.what),
+                        format!("The download of {} ended unexpectedly", self.what),
                     )
-                    .because(format!("{}: {e}", self.url))
-                    .hint("run the command again; Kiln does not reuse a partial download")
-                    .with_source(e));
+                    .because(format!(
+                        "{}: the transfer stopped without a result.",
+                        self.url
+                    ))
+                    .hint("run the command again"));
                 }
-            };
-
-            written += read as u64;
-            if written > MAX_ARTIFACT_BYTES {
-                progress.finish();
-                return Err(oversize(self.what, self.url, written));
             }
-
-            let chunk = &buffer[..read];
-            hasher.update(chunk);
-            if let Err(e) = file.write_all(chunk) {
-                progress.finish();
-                return Err(Error::io("Could not write the download", destination, e));
-            }
-            progress.advance(read as u64);
         }
-
-        file.flush()
-            .io_context("Could not write the download", destination)?;
-        // Force the bytes out before anything is verified against them, so a
-        // crash cannot leave a file that passed verification but is not on disk.
-        file.sync_all()
-            .io_context("Could not flush the download to disk", destination)?;
-        drop(file);
-        progress.finish();
-
-        let actual = hasher.finish();
-        if actual != *self.expected {
-            return Err(digest_mismatch(self.what, self.url, self.expected, &actual));
-        }
-
-        Ok(written)
     }
+}
+
+/// What a worker tells the thread watching it.
+enum Event {
+    /// Headers are in; here is the size the server declared, if any.
+    Started(Option<u64>),
+    /// The transfer finished, one way or the other.
+    Done(Result<u64>),
+}
+
+/// Where one attempt writes before it is promoted to `destination`.
+fn part_path(destination: &Path, attempt: u32) -> PathBuf {
+    let mut name = destination.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".part{attempt}"));
+    destination.with_file_name(name)
+}
+
+/// The transfer itself. Runs on a worker thread and touches no terminal.
+#[allow(clippy::too_many_arguments)]
+fn transfer(
+    http: &Http,
+    url: &str,
+    what: &str,
+    expected: &Digest,
+    declared_size: Option<u64>,
+    part: &Path,
+    destination: &Path,
+    counter: &AtomicU64,
+    events: &mpsc::Sender<Event>,
+) -> Result<u64> {
+    let mut response = http
+        .download_agent()
+        .get(url)
+        .call()
+        .map_err(|e| transport_error(e, url, what))?;
+
+    check_status(response.status().as_u16(), url, what)?;
+
+    let declared = response.body().content_length().or(declared_size);
+    if let Some(declared) = declared
+        && declared > MAX_ARTIFACT_BYTES
+    {
+        return Err(oversize(what, url, declared));
+    }
+    let _ = events.send(Event::Started(declared));
+
+    let mut reader = response.body_mut().as_reader();
+    let mut file =
+        std::fs::File::create(part).io_context("Could not create the download file", part)?;
+
+    let mut hasher = Digest::hasher(expected.algorithm());
+    let mut buffer = vec![0u8; CHUNK_BYTES];
+    let mut written: u64 = 0;
+
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorKind::Network,
+                    format!("The download of {what} was interrupted"),
+                )
+                .because(format!("{url}: {e}"))
+                .hint("run the command again; Kiln does not reuse a partial download")
+                .with_source(e));
+            }
+        };
+
+        written += read as u64;
+        if written > MAX_ARTIFACT_BYTES {
+            return Err(oversize(what, url, written));
+        }
+
+        let chunk = &buffer[..read];
+        hasher.update(chunk);
+        file.write_all(chunk)
+            .map_err(|e| Error::io("Could not write the download", part, e))?;
+
+        // Published after the bytes are safely in the file, so the watching
+        // thread never sees progress that has not happened.
+        counter.store(written, Ordering::Relaxed);
+    }
+
+    file.flush()
+        .io_context("Could not write the download", part)?;
+    // Force the bytes out before anything is verified against them, so a
+    // crash cannot leave a file that passed verification but is not on disk.
+    file.sync_all()
+        .io_context("Could not flush the download to disk", part)?;
+    drop(file);
+
+    let actual = hasher.finish();
+    if actual != *expected {
+        let _ = std::fs::remove_file(part);
+        return Err(digest_mismatch(what, url, expected, &actual));
+    }
+
+    // Only a verified artifact gets the name the caller asked for.
+    std::fs::rename(part, destination).io_context("Could not finish the download", destination)?;
+
+    Ok(written)
+}
+
+/// A transfer that stopped receiving anything.
+fn stalled(what: &str, url: &str, received: u64) -> Error {
+    Error::new(
+        ErrorKind::Network,
+        format!("The download of {what} stopped responding"),
+    )
+    .because(format!(
+        "{url} sent nothing for {} seconds, after {received} bytes. \
+         The connection is still open, so this is a stalled server or network \
+         rather than a refused one.",
+        STALL_TIMEOUT.as_secs()
+    ))
+    .hint("run the command again; Kiln does not reuse a partial download")
+    .hint("if it keeps happening at the same point, the mirror may be unhealthy")
 }
 
 /// Re-verify a file already on disk against a digest.
@@ -251,6 +438,180 @@ mod tests {
 
     fn digest_of(data: &[u8]) -> Digest {
         Digest::of_bytes(HashAlgorithm::Sha256, data)
+    }
+
+    /// A local HTTP server, for exercising the transfer without the network.
+    ///
+    /// Plain HTTP and 127.0.0.1 only — these run in the default `cargo test`
+    /// suite, which has to work on a plane.
+    struct Server {
+        port: u16,
+    }
+
+    impl Server {
+        /// Serve `body` in full to every connection.
+        fn serving(body: &'static [u8]) -> Self {
+            Self::spawn(move |socket| {
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(body);
+                let _ = socket.flush();
+            })
+        }
+
+        /// Send headers and `prefix`, then go silent without ever closing.
+        ///
+        /// This is the failure that hung a real install: the connection stays
+        /// established, so nothing at the socket level ever reports an error.
+        fn stalling(prefix: &'static [u8], declared: usize) -> Self {
+            Self::spawn(move |socket| {
+                let header = format!("HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n\r\n");
+                let _ = socket.write_all(header.as_bytes());
+                let _ = socket.write_all(prefix);
+                let _ = socket.flush();
+                std::thread::sleep(Duration::from_secs(120));
+            })
+        }
+
+        fn spawn(handle: impl Fn(&mut std::net::TcpStream) + Send + 'static) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+
+            std::thread::spawn(move || {
+                // Every retry opens a new connection, so keep accepting.
+                for socket in listener.incoming() {
+                    let Ok(mut socket) = socket else { break };
+                    let mut scratch = [0u8; 2048];
+                    let _ = socket.read(&mut scratch);
+                    handle(&mut socket);
+                }
+            });
+            Server { port }
+        }
+
+        fn url(&self) -> String {
+            format!("http://127.0.0.1:{}/artifact.tar.gz", self.port)
+        }
+    }
+
+    #[test]
+    fn a_complete_download_is_verified_and_promoted() {
+        let body: &[u8] = b"node-22.14.0-payload";
+        let server = Server::serving(body);
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("artifact.tar.gz");
+        let expected = digest_of(body);
+
+        let written = Download {
+            url: &server.url(),
+            what: "Node.js 22.14.0",
+            expected: &expected,
+            size: None,
+        }
+        .to_file(&Http::new(false), &destination, &mut SilentProgress)
+        .expect("a healthy transfer");
+
+        assert_eq!(written, body.len() as u64);
+        assert_eq!(std::fs::read(&destination).unwrap(), body);
+        // The part file is a staging detail and must not survive.
+        assert!(!part_path(&destination, 1).exists());
+    }
+
+    #[test]
+    fn a_download_whose_bytes_are_wrong_is_destroyed() {
+        let server = Server::serving(b"something else entirely");
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("artifact.tar.gz");
+        let expected = digest_of(b"what was asked for");
+
+        let error = Download {
+            url: &server.url(),
+            what: "Node.js 22.14.0",
+            expected: &expected,
+            size: None,
+        }
+        .to_file(&Http::new(false), &destination, &mut SilentProgress)
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Verification);
+        assert!(!destination.exists(), "a wrong artifact must not survive");
+        assert!(!part_path(&destination, 1).exists());
+    }
+
+    #[test]
+    fn a_stalled_transfer_is_reported_instead_of_hanging() {
+        // The regression this exists for. Before Kiln watched the byte counter
+        // itself, this blocked in `recvfrom` for as long as the server cared to
+        // hold the connection open — twenty minutes, in the case that found it.
+        let server = Server::stalling(b"the first few bytes", 10_000_000);
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("artifact.tar.gz");
+        let expected = digest_of(b"never arrives");
+
+        let started = Instant::now();
+        let error = Download {
+            url: &server.url(),
+            what: "Node.js 22.14.0",
+            expected: &expected,
+            size: None,
+        }
+        .to_file(&Http::new(false), &destination, &mut SilentProgress)
+        .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::Network);
+        assert!(
+            error.summary().contains("stopped responding"),
+            "got: {}",
+            error.summary()
+        );
+        // Three attempts plus backoff, each bounded by the stall timeout.
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "took {:?} — the stall watchdog did not fire",
+            started.elapsed()
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn a_stall_says_how_much_arrived_before_it_died() {
+        let server = Server::stalling(b"0123456789", 10_000_000);
+        let error = stalled("Node.js 22.14.0", &server.url(), 10);
+
+        // "nothing at all" and "died three quarters of the way through" are very
+        // different situations to be told about.
+        assert!(error.reason().unwrap().contains("after 10 bytes"));
+        assert!(error.reason().unwrap().contains("stalled server"));
+    }
+
+    #[test]
+    fn each_attempt_writes_to_its_own_part_file() {
+        // An abandoned worker may still be writing when the next attempt
+        // starts. Sharing one path would let it corrupt the retry.
+        let destination = Path::new("/staging/artifact.tar.gz");
+        let names: Vec<String> = (1..=MAX_ATTEMPTS)
+            .map(|n| {
+                part_path(destination, n)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+
+        assert_eq!(
+            names,
+            [
+                "artifact.tar.gz.part1",
+                "artifact.tar.gz.part2",
+                "artifact.tar.gz.part3"
+            ]
+        );
+        assert_eq!(
+            part_path(destination, 1).parent(),
+            Some(Path::new("/staging")),
+            "the part file must stay beside its destination, on one filesystem"
+        );
     }
 
     #[test]
