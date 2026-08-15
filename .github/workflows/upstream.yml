@@ -83,6 +83,14 @@ jobs:
         working-directory: website
         run: ../target/release/kiln install
 
+      # Through `kiln run`, so the npm doing the work is the one bundled with
+      # the Node that Kiln just installed. Calling npm directly would quietly
+      # reintroduce a dependency on the runner's toolchain, which is the exact
+      # thing this job exists to rule out.
+      - name: Install the site's packages with Kiln's npm
+        working-directory: website
+        run: ../target/release/kiln run npm ci
+
       - name: Build the site with Kiln
         working-directory: website
         run: ../target/release/kiln run build
